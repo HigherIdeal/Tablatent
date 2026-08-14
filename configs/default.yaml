@@ -53,3 +53,16 @@ stage1:
 evaluation:
   batch_size: 8192
   sample_rows: 2000
+
+# Stage 2 첫 baseline: frozen Stage 1 latent에서 가까운 과거 row들의
+# control_success 평균을 확률로 사용한다.
+knn_probability:
+  k_values: [20, 50, 100, 200, 500, 1000]
+  index_type: ivf_flat
+  nlist: 4096
+  nprobe: 32
+  index_train_rows: 200000
+  query_batch_size: 4096
+  use_gpu_if_available: true
+  neighbor_example_queries: 5
+  neighbor_example_k: 10
