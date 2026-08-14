@@ -1,41 +1,55 @@
 seed: 42
 
 paths:
-  processed_dir: data/processed
+  processed_file: data/processed/train.pkl
   output_dir: outputs
 
 data:
   target_col: control_success
   season_col: season
+  row_id_col: row_id
   train_seasons: [2019, 2020, 2021, 2022]
   val_seasons: [2023]
   test_seasons: [2024]
-  current_include: []
-  history_include: []
-  exclude_columns: []
-  history_patterns: ["^asof_", "history", "hist_", "career", "recent", "rolling", "pitcher_.*(rate|avg|mean|std|count)", "batter_.*(rate|avg|mean|std|count)"]
-  post_event_patterns: ["^target$", "result", "outcome", "actual", "after_", "post_", "end_speed", "plate_[xyz]", "hit_", "launch_", "exit_velocity"]
+
+  # Stage 1 history snapshot. target/ID는 사용하지 않는다.
+  history_patterns:
+    - "^asof_"
+
+  exclude_columns:
+    - pitcher_id
+    - batter_id
+    - pitcher_team_id
+    - batter_team_id
+    - control_success
+    - row_id
+    - season
 
 stage1:
-  latent_dim_current: 32
-  latent_dim_history: 32
-  hidden_dims: [256, 128]
-  dropout: 0.10
-  noise_std: 0.03
-  batch_size: 2048
-  epochs: 30
-  patience: 5
-  learning_rate: 0.001
-  weight_decay: 0.0001
-  num_workers: 0
+  context:
+    latent_dim: 16
+    hidden_dims: [128, 64]
+    embedding_dim_max: 8
+    dropout: 0.10
+    category_mask_prob: 0.05
+    numeric_noise_std: 0.03
+    categorical_loss_weight: 1.0
+    numeric_loss_weight: 1.0
 
-stage2:
-  hidden_dims: [128, 64]
-  dropout: 0.15
+  history:
+    latent_dim: 16
+    hidden_dims: [128, 64]
+    dropout: 0.10
+    noise_std: 0.03
+
   batch_size: 4096
   epochs: 30
   patience: 5
   learning_rate: 0.001
   weight_decay: 0.0001
   num_workers: 0
+  latent_storage_dtype: float16
 
+evaluation:
+  batch_size: 8192
+  sample_rows: 2000
