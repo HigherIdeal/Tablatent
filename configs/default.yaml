@@ -54,7 +54,7 @@ evaluation:
   batch_size: 8192
   sample_rows: 2000
 
-# Stage 2 sanity baseline: 가까운 latent row들의 raw control_success 평균.
+# Latent-space kNN은 representation sanity probe로만 남겨둔다.
 knn_probability:
   k_values: [20, 50, 100, 200, 500, 1000]
   index_type: ivf_flat
@@ -66,9 +66,7 @@ knn_probability:
   neighbor_example_queries: 5
   neighbor_example_k: 10
 
-# Stage 2 학습용 dataset.
-# z 자체 + 여러 scale의 local probability / local sample reliability를 만든다.
-# train local feature는 cross-fitting하여 자기 fold의 control_success를 사용하지 않는다.
+# 이전 local-probability 실험용 설정. 현재 train_stage2.py에서는 사용하지 않는다.
 stage2_dataset:
   k_values: [100, 500, 1000]
   crossfit_folds: 5
@@ -80,20 +78,17 @@ stage2_dataset:
   query_batch_size: 2048
   use_gpu_if_available: true
 
-# local_prob_k1000을 empirical prior로 두고 작은 residual correction만 허용한다.
-# objective = Brier + anchor_lambda * (prediction - local_prior)^2
-# epoch 0(local prior 자체)도 best checkpoint 후보로 유지한다.
+# Current Stage 2:
+# frozen 16D context + 16D history = 32D latent
+# z -> Linear(32,1) -> sigmoid -> P(control_success=1)
+# raw 0/1 labels로 BCEWithLogitsLoss를 학습한다. kNN/보정/local prior는 사용하지 않는다.
 stage2:
-  prior_k: 1000
-  hidden_dims: [64, 32]
-  dropout: 0.15
-  batch_size: 4096
-  eval_batch_size: 8192
+  batch_size: 8192
+  eval_batch_size: 16384
   epochs: 30
   patience: 5
-  min_delta: 0.0000001
-  learning_rate: 0.0003
-  weight_decay: 0.001
-  anchor_lambda: 5.0
+  min_delta: 0.000001
+  learning_rate: 0.003
+  weight_decay: 0.0
+  threshold: 0.5
   num_workers: 0
-  loss: brier
