@@ -7,7 +7,7 @@ if str(ROOT) not in sys.path:
 
 import argparse
 
-from src.stage2_linear import train_stage2
+from src.stage2_mlp import train_stage2
 from src.utils import load_config
 
 
