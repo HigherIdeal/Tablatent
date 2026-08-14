@@ -1,23 +1,22 @@
-from __future__ import annotations
-
-import argparse
-import sys
 from pathlib import Path
+import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import argparse
 
 from src.pipeline import train_stage1
 from src.utils import load_config
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="독립적인 현재 상황/과거 이력 latent 학습")
+def main():
+    parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/default.yaml")
     args = parser.parse_args()
-    train_stage1(load_config(args.config))
+    train_stage1(load_config(ROOT / args.config))
 
 
 if __name__ == "__main__":
     main()
-
