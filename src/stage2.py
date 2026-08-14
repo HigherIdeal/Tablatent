@@ -12,7 +12,7 @@ from tqdm.auto import tqdm
 
 from .data import load_frame, split_masks
 from .knn_probability import _load_latents, _make_faiss_index
-from .utils import ensure_output_dirs, save_json, seed_everything
+from .utils import save_json, seed_everything
 
 
 def _stage2_dir(config: dict) -> Path:
@@ -142,10 +142,10 @@ def build_stage2_dataset(config: dict, include_test: bool = False) -> dict:
     test_global = np.flatnonzero(test_mask)
 
     # Geometry is defined only by Stage 1 training seasons.
-    scaler = StandardScaler()
-    train_z = scaler.fit_transform(z[train_mask]).astype(np.float32, copy=False)
-    val_z = scaler.transform(z[val_mask]).astype(np.float32, copy=False)
-    test_z = scaler.transform(z[test_mask]).astype(np.float32, copy=False)
+    latent_scaler = StandardScaler()
+    train_z = latent_scaler.fit_transform(z[train_mask]).astype(np.float32, copy=False)
+    val_z = latent_scaler.transform(z[val_mask]).astype(np.float32, copy=False)
+    test_z = latent_scaler.transform(z[test_mask]).astype(np.float32, copy=False)
     train_y = y_all[train_mask]
     val_y = y_all[val_mask]
     test_y = y_all[test_mask]
@@ -196,6 +196,20 @@ def build_stage2_dataset(config: dict, include_test: bool = False) -> dict:
         desc="2023 Stage2 local features",
     )
 
+    # Keep local probabilities in [0,1], but standardize reliability features
+    # (effective_n/radius) on cross-fitted train rows only.
+    local_names = _local_feature_names(ks)
+    auxiliary_local_idx = [
+        i for i, name in enumerate(local_names) if not name.startswith("local_prob_")
+    ]
+    local_aux_scaler = StandardScaler()
+    train_local[:, auxiliary_local_idx] = local_aux_scaler.fit_transform(
+        train_local[:, auxiliary_local_idx]
+    ).astype(np.float32)
+    val_local[:, auxiliary_local_idx] = local_aux_scaler.transform(
+        val_local[:, auxiliary_local_idx]
+    ).astype(np.float32)
+
     train_x = np.concatenate([train_z, train_local], axis=1).astype(np.float32, copy=False)
     val_x = np.concatenate([val_z, val_local], axis=1).astype(np.float32, copy=False)
 
@@ -204,7 +218,6 @@ def build_stage2_dataset(config: dict, include_test: bool = False) -> dict:
     _save_split(root, "val", val_x, val_y, val_global)
 
     latent_names = [f"z_{i:02d}" for i in range(train_z.shape[1])]
-    local_names = _local_feature_names(ks)
     feature_names = latent_names + local_names
 
     metadata = {
@@ -220,8 +233,11 @@ def build_stage2_dataset(config: dict, include_test: bool = False) -> dict:
         "crossfit_folds": folds,
         "prior_strength": prior_strength,
         "train_target_mean": train_prior,
-        "latent_scaler_mean": scaler.mean_.astype(float).tolist(),
-        "latent_scaler_scale": scaler.scale_.astype(float).tolist(),
+        "latent_scaler_mean": latent_scaler.mean_.astype(float).tolist(),
+        "latent_scaler_scale": latent_scaler.scale_.astype(float).tolist(),
+        "local_auxiliary_feature_names": [local_names[i] for i in auxiliary_local_idx],
+        "local_aux_scaler_mean": local_aux_scaler.mean_.astype(float).tolist(),
+        "local_aux_scaler_scale": local_aux_scaler.scale_.astype(float).tolist(),
         "faiss_backend": backend,
         "local_probability_definition": "adaptive Gaussian distance-weighted Bernoulli mean with empirical-Bayes shrinkage",
         "train_local_features_are_cross_fitted": True,
@@ -240,6 +256,9 @@ def build_stage2_dataset(config: dict, include_test: bool = False) -> dict:
             batch_size=batch_size,
             desc="2024 Stage2 local features",
         )
+        test_local[:, auxiliary_local_idx] = local_aux_scaler.transform(
+            test_local[:, auxiliary_local_idx]
+        ).astype(np.float32)
         test_x = np.concatenate([test_z, test_local], axis=1).astype(np.float32, copy=False)
         _save_split(root, "test", test_x, test_y, test_global)
         metadata["test_rows"] = int(len(test_x))
@@ -293,7 +312,11 @@ def _brier_np(y: np.ndarray, p: np.ndarray) -> float:
     return float(np.mean(np.square(np.asarray(p) - np.asarray(y))))
 
 
-def _run_validation(model: nn.Module, loader: DataLoader, device: torch.device) -> tuple[float, np.ndarray]:
+def _run_validation(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+) -> tuple[float, np.ndarray]:
     model.eval()
     preds: list[np.ndarray] = []
     ys: list[np.ndarray] = []
