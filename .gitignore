@@ -1,0 +1,13 @@
+data/
+sources/
+AGENTS.md
+*.zip
+.publish_repo/
+.verify_deps/
+outputs/checkpoints/*
+outputs/latents/*
+outputs/logs/*
+!outputs/**/.gitkeep
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/

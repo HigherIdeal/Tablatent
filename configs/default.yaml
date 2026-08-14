@@ -1,0 +1,41 @@
+seed: 42
+
+paths:
+  processed_dir: data/processed
+  output_dir: outputs
+
+data:
+  target_col: control_success
+  season_col: season
+  train_seasons: [2019, 2020, 2021, 2022]
+  val_seasons: [2023]
+  test_seasons: [2024]
+  current_include: []
+  history_include: []
+  exclude_columns: []
+  history_patterns: ["^asof_", "history", "hist_", "career", "recent", "rolling", "pitcher_.*(rate|avg|mean|std|count)", "batter_.*(rate|avg|mean|std|count)"]
+  post_event_patterns: ["^target$", "result", "outcome", "actual", "after_", "post_", "end_speed", "plate_[xyz]", "hit_", "launch_", "exit_velocity"]
+
+stage1:
+  latent_dim_current: 32
+  latent_dim_history: 32
+  hidden_dims: [256, 128]
+  dropout: 0.10
+  noise_std: 0.03
+  batch_size: 2048
+  epochs: 30
+  patience: 5
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  num_workers: 0
+
+stage2:
+  hidden_dims: [128, 64]
+  dropout: 0.15
+  batch_size: 4096
+  epochs: 30
+  patience: 5
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  num_workers: 0
+
