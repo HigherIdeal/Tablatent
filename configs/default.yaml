@@ -39,7 +39,7 @@ stage1:
     numeric_noise_std: 0.03
     categorical_loss_weight: 1.0
     numeric_loss_weight: 1.0
-    kl_beta: 0.0001
+    kl_beta: 0.0005
     kl_warmup_epochs: 10
 
   history:
@@ -47,7 +47,7 @@ stage1:
     hidden_dims: [128, 64]
     dropout: 0.10
     noise_std: 0.03
-    kl_beta: 0.0001
+    kl_beta: 0.0005
     kl_warmup_epochs: 10
 
   batch_size: 4096
@@ -86,11 +86,13 @@ stage2_dataset:
   query_batch_size: 2048
   use_gpu_if_available: true
 
-# Current Stage 2:
+# Current Stage 2 experiment:
 # frozen VAE posterior means: 16D context mu + 16D history mu = 32D
-# z -> Linear(32,1) -> sigmoid -> P(control_success=1)
-# raw 0/1 labels로 BCEWithLogitsLoss를 학습한다. kNN/보정/local prior는 사용하지 않는다.
+# 32 -> 64 -> GELU -> 32 -> GELU -> 1 -> sigmoid
+# raw 0/1 labels로 BCEWithLogitsLoss를 학습한다.
+# Linear baseline은 src/stage2_linear.py에 보존한다.
 stage2:
+  hidden_dims: [64, 32]
   batch_size: 8192
   eval_batch_size: 16384
   epochs: 30
