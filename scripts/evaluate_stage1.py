@@ -7,7 +7,7 @@ if str(ROOT) not in sys.path:
 
 import argparse
 
-from src.pipeline import train_stage1
+from src.pipeline import evaluate_stage1
 from src.utils import load_config
 
 
@@ -15,7 +15,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/default.yaml")
     args = parser.parse_args()
-    train_stage1(load_config(ROOT / args.config))
+    evaluate_stage1(load_config(ROOT / args.config))
 
 
 if __name__ == "__main__":
