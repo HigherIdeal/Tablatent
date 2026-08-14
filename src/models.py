@@ -21,8 +21,21 @@ def embedding_dim(cardinality: int, max_dim: int) -> int:
     return max(2, min(max_dim, int(round(1.6 * math.sqrt(max(cardinality, 2))))))
 
 
-class ContextAutoencoder(nn.Module):
-    """Categorical embedding + numeric input -> latent -> mixed reconstruction."""
+def kl_divergence_standard_normal(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+    """Mean per-row KL(q(z|x) || N(0, I)); latent dimensions are summed."""
+    return -0.5 * torch.mean(
+        torch.sum(1.0 + logvar - mu.square() - logvar.exp(), dim=1)
+    )
+
+
+class ContextVAE(nn.Module):
+    """
+    Mixed tabular context VAE.
+
+    Categorical values are embedded exactly as before and numeric values are
+    concatenated. The encoder now predicts a Gaussian posterior (mu, logvar)
+    instead of a single deterministic code.
+    """
 
     def __init__(
         self,
@@ -36,6 +49,7 @@ class ContextAutoencoder(nn.Module):
         super().__init__()
         self.cardinalities = list(cardinalities)
         self.numeric_dim = int(numeric_dim)
+        self.latent_dim = int(latent_dim)
 
         emb_dims = [embedding_dim(c, embedding_dim_max) for c in self.cardinalities]
         self.embeddings = nn.ModuleList(
@@ -43,38 +57,108 @@ class ContextAutoencoder(nn.Module):
         )
         input_dim = sum(emb_dims) + self.numeric_dim
 
-        self.encoder = _mlp([input_dim, *hidden_dims, latent_dim], dropout, final_activation=False)
+        if hidden_dims:
+            self.encoder_trunk = _mlp(
+                [input_dim, *hidden_dims], dropout, final_activation=True
+            )
+            encoder_dim = hidden_dims[-1]
+        else:
+            self.encoder_trunk = nn.Identity()
+            encoder_dim = input_dim
+
+        self.mu_head = nn.Linear(encoder_dim, latent_dim)
+        self.logvar_head = nn.Linear(encoder_dim, latent_dim)
+
         self.decoder_trunk = _mlp(
             [latent_dim, *reversed(hidden_dims)], dropout, final_activation=True
-        )
+        ) if hidden_dims else nn.Identity()
         decoder_dim = hidden_dims[0] if hidden_dims else latent_dim
         self.category_heads = nn.ModuleList(
             [nn.Linear(decoder_dim, cardinality) for cardinality in self.cardinalities]
         )
         self.numeric_head = nn.Linear(decoder_dim, self.numeric_dim)
 
-    def encode(self, categorical: torch.Tensor, numeric: torch.Tensor) -> torch.Tensor:
+    def _input(self, categorical: torch.Tensor, numeric: torch.Tensor) -> torch.Tensor:
         embedded = [layer(categorical[:, i]) for i, layer in enumerate(self.embeddings)]
-        return self.encoder(torch.cat([*embedded, numeric], dim=1))
+        return torch.cat([*embedded, numeric], dim=1)
+
+    def encode_distribution(
+        self,
+        categorical: torch.Tensor,
+        numeric: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        h = self.encoder_trunk(self._input(categorical, numeric))
+        mu = self.mu_head(h)
+        logvar = self.logvar_head(h).clamp(-10.0, 10.0)
+        return mu, logvar
+
+    @staticmethod
+    def reparameterize(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+        std = torch.exp(0.5 * logvar)
+        return mu + std * torch.randn_like(std)
+
+    def encode(
+        self,
+        categorical: torch.Tensor,
+        numeric: torch.Tensor,
+        sample: bool = False,
+    ) -> torch.Tensor:
+        mu, logvar = self.encode_distribution(categorical, numeric)
+        return self.reparameterize(mu, logvar) if sample else mu
 
     def decode(self, z: torch.Tensor):
         h = self.decoder_trunk(z)
         return [head(h) for head in self.category_heads], self.numeric_head(h)
 
     def forward(self, categorical: torch.Tensor, numeric: torch.Tensor):
-        return self.decode(self.encode(categorical, numeric))
+        mu, logvar = self.encode_distribution(categorical, numeric)
+        z = self.reparameterize(mu, logvar)
+        cat_logits, pred_num = self.decode(z)
+        return cat_logits, pred_num, mu, logvar
 
 
-class HistoryAutoencoder(nn.Module):
+class HistoryVAE(nn.Module):
+    """Numeric history VAE with the same 128 -> 64 -> 16 bottleneck sizes as the prior AE."""
+
     def __init__(self, input_dim: int, hidden_dims: list[int], latent_dim: int, dropout: float):
         super().__init__()
-        self.encoder = _mlp([input_dim, *hidden_dims, latent_dim], dropout, final_activation=False)
+        self.input_dim = int(input_dim)
+        self.latent_dim = int(latent_dim)
+
+        if hidden_dims:
+            self.encoder_trunk = _mlp(
+                [input_dim, *hidden_dims], dropout, final_activation=True
+            )
+            encoder_dim = hidden_dims[-1]
+        else:
+            self.encoder_trunk = nn.Identity()
+            encoder_dim = input_dim
+
+        self.mu_head = nn.Linear(encoder_dim, latent_dim)
+        self.logvar_head = nn.Linear(encoder_dim, latent_dim)
         self.decoder = _mlp(
             [latent_dim, *reversed(hidden_dims), input_dim], dropout, final_activation=False
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.decoder(self.encoder(x))
+    def encode_distribution(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        h = self.encoder_trunk(x)
+        mu = self.mu_head(h)
+        logvar = self.logvar_head(h).clamp(-10.0, 10.0)
+        return mu, logvar
+
+    @staticmethod
+    def reparameterize(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+        std = torch.exp(0.5 * logvar)
+        return mu + std * torch.randn_like(std)
+
+    def encode(self, x: torch.Tensor, sample: bool = False) -> torch.Tensor:
+        mu, logvar = self.encode_distribution(x)
+        return self.reparameterize(mu, logvar) if sample else mu
+
+    def forward(self, x: torch.Tensor):
+        mu, logvar = self.encode_distribution(x)
+        z = self.reparameterize(mu, logvar)
+        return self.decoder(z), mu, logvar
 
 
 def context_reconstruction_loss(
