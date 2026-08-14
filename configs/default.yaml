@@ -80,16 +80,20 @@ stage2_dataset:
   query_batch_size: 2048
   use_gpu_if_available: true
 
-# local_prob_k1000을 empirical prior로 두고 latent/local statistics로 logit correction을 학습.
+# local_prob_k1000을 empirical prior로 두고 작은 residual correction만 허용한다.
+# objective = Brier + anchor_lambda * (prediction - local_prior)^2
+# epoch 0(local prior 자체)도 best checkpoint 후보로 유지한다.
 stage2:
   prior_k: 1000
-  hidden_dims: [128, 64]
-  dropout: 0.10
+  hidden_dims: [64, 32]
+  dropout: 0.15
   batch_size: 4096
   eval_batch_size: 8192
   epochs: 30
   patience: 5
-  learning_rate: 0.001
-  weight_decay: 0.0001
+  min_delta: 0.0000001
+  learning_rate: 0.0003
+  weight_decay: 0.001
+  anchor_lambda: 5.0
   num_workers: 0
   loss: brier
