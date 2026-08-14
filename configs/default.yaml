@@ -25,6 +25,10 @@ data:
     - row_id
     - season
 
+# Stage 1 VAE.
+# 기존 AE와 공정하게 비교하기 위해 feature 구성과 hidden/latent 차원은 유지한다.
+# context/history 각각 q(z|x)=N(mu, sigma^2)를 학습하고,
+# Stage2에는 random sample이 아니라 deterministic posterior mean mu를 전달한다.
 stage1:
   context:
     latent_dim: 16
@@ -35,12 +39,16 @@ stage1:
     numeric_noise_std: 0.03
     categorical_loss_weight: 1.0
     numeric_loss_weight: 1.0
+    kl_beta: 0.0001
+    kl_warmup_epochs: 10
 
   history:
     latent_dim: 16
     hidden_dims: [128, 64]
     dropout: 0.10
     noise_std: 0.03
+    kl_beta: 0.0001
+    kl_warmup_epochs: 10
 
   batch_size: 4096
   epochs: 30
@@ -79,7 +87,7 @@ stage2_dataset:
   use_gpu_if_available: true
 
 # Current Stage 2:
-# frozen 16D context + 16D history = 32D latent
+# frozen VAE posterior means: 16D context mu + 16D history mu = 32D
 # z -> Linear(32,1) -> sigmoid -> P(control_success=1)
 # raw 0/1 labels로 BCEWithLogitsLoss를 학습한다. kNN/보정/local prior는 사용하지 않는다.
 stage2:
