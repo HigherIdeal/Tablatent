@@ -87,7 +87,8 @@ Constraints:
 Training:
 
 - objective: `Logloss`
-- validation/model-selection metric: `BrierScore`
+- GPU early stopping/model selection: `Logloss`
+- primary reported validation metric: Brier computed from `predict_proba`
 - iterations: `2000`
 - learning rate: `0.03`
 - depth: `6`
@@ -95,6 +96,8 @@ Training:
 - random strength: `1`
 - early stopping: `100`
 - default backend: GPU device 0
+
+`BrierScore` is not used as the GPU eval metric; CatBoost documents it as unavailable on GPU. We still calculate the exact validation Brier from the final probability vector so the experiment remains directly comparable to the linear/MLP/bilinear probes.
 
 Run:
 
