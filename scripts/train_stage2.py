@@ -8,6 +8,7 @@ if str(ROOT) not in sys.path:
 import argparse
 
 from src.stage2_bilinear import train_stage2 as train_bilinear
+from src.stage2_catboost import train_stage2 as train_catboost
 from src.stage2_linear import train_stage2 as train_linear
 from src.stage2_mlp import train_stage2 as train_mlp
 from src.utils import load_config
@@ -15,6 +16,7 @@ from src.utils import load_config
 
 HEADS = {
     "bilinear": train_bilinear,
+    "catboost": train_catboost,
     "linear": train_linear,
     "mlp": train_mlp,
 }
@@ -26,8 +28,8 @@ def main():
     parser.add_argument(
         "--head",
         choices=sorted(HEADS),
-        default="bilinear",
-        help="Stage2 probe. Default is the 2026-08-15 bilinear context-history experiment.",
+        default="catboost",
+        help="Stage2 probe. Default is CatBoost on frozen context/history posterior means.",
     )
     args = parser.parse_args()
     HEADS[args.head](load_config(ROOT / args.config))

@@ -25,23 +25,23 @@ python scripts/run_stage1.py --config configs/default.yaml
 
 `https://drive.google.com/file/d/1RqoOknOl39FnNMgHZ-DQrVim8Of-odKM/view?usp=drive_link`
 
-## Colab Stage 1 cache
+## Stage 1 cache
 
-Colab 세션 종료 후 Stage 1을 다시 학습하지 않도록 Google Drive에 Stage 1 결과를 보존합니다. 기본 cache 위치는 `/content/drive/MyDrive/Tablatent/stage1_cache`입니다.
-
-Stage 1 학습 직후:
+Stage 1을 다시 학습하지 않도록 Google Drive 또는 로컬 동기화 Drive 경로에 Stage 1 결과를 보존할 수 있습니다.
 
 ```bash
 python scripts/stage1_cache.py push
-```
-
-새 Colab 세션에서 repository와 requirements를 준비한 뒤:
-
-```bash
 python scripts/stage1_cache.py pull
 ```
 
-`pull`이 끝나면 바로 Stage 2를 실행할 수 있습니다. 기본 cache에는 다음을 포함합니다.
+Windows Google Drive처럼 별도 경로를 쓰면:
+
+```powershell
+python scripts/stage1_cache.py push --drive-dir "G:\내 드라이브\학습\LG Aimers 9기\해커톤\오프라인\data\Tablatent\stage1_cache"
+python scripts/stage1_cache.py pull --drive-dir "G:\내 드라이브\학습\LG Aimers 9기\해커톤\오프라인\data\Tablatent\stage1_cache"
+```
+
+기본 cache에는 다음을 포함합니다.
 
 ```text
 outputs/latents/context.npy
@@ -55,50 +55,72 @@ outputs/logs/stage1_training.json
 data/processed/train.pkl
 ```
 
-각 파일은 SHA256 manifest로 검증합니다. processed dataset을 Drive에 저장하고 싶지 않으면 push/pull 모두 `--exclude-data`를 사용합니다.
+각 파일은 SHA256 manifest로 검증합니다. processed dataset을 Drive에 저장하고 싶지 않으면 `--exclude-data`를 사용합니다.
 
-```bash
-python scripts/stage1_cache.py push --exclude-data
-python scripts/stage1_cache.py pull --exclude-data
-```
+## Stage 2 — current experiment: CatBoost on frozen latent
 
-## Stage 2 — current experiment
-
-2026-08-15 기본 실험은 generic MLP 대신 context-history interaction을 명시적으로 학습하는 bilinear probe입니다.
+현재 기본 Stage 2는 Stage 1에서 만든 posterior mean만 사용합니다.
 
 ```text
-c = mu_context  # 16D
-h = mu_history  # 16D
-g = Bilinear(c, h)  # 16D
-[c, h, g]  # 48D
- -> Linear(48, 1)
- -> sigmoid
+mu_context 16D
+mu_history 16D
+     ↓ concat
+32 numeric latent features
+     ↓
+CatBoostClassifier
+     ↓
+control_success probability
 ```
 
-raw `control_success` 0/1 label과 `BCEWithLogitsLoss`를 사용하며, Stage 1은 frozen입니다.
+제약:
+
+- Stage 1 frozen
+- raw feature 미사용
+- player/team ID 미사용
+- local probability 미사용
+- 2024 holdout 미사용
+- latent standardization 미사용
+
+GPU 학습과 early stopping은 `Logloss`를 사용하고, 최종 선택된 모델의 `predict_proba`로 validation Brier를 별도로 계산해 주 평가값으로 기록합니다.
 
 ```bash
-python scripts/train_stage2.py --config configs/default.yaml --head bilinear
+python scripts/train_stage2.py --config configs/default.yaml --head catboost
 ```
 
-기존 baseline도 같은 latent와 temporal split에서 그대로 실행할 수 있습니다.
+현재 default head도 `catboost`입니다.
+
+주요 출력:
+
+```text
+outputs/stage2_catboost/stage2_catboost.cbm
+outputs/stage2_catboost/metrics.json
+outputs/stage2_catboost/validation_predictions.csv
+outputs/stage2_catboost/feature_importance.csv
+```
+
+## Stage 2 comparison probes
+
+기존 probe는 삭제하지 않고 같은 frozen latent와 temporal split에서 비교합니다.
 
 ```bash
 python scripts/train_stage2.py --config configs/default.yaml --head linear
 python scripts/train_stage2.py --config configs/default.yaml --head mlp
+python scripts/train_stage2.py --config configs/default.yaml --head bilinear
 ```
 
-주요 Bilinear 출력:
+현재 기록된 validation Brier:
 
 ```text
-outputs/stage2_bilinear/stage2_bilinear_best.pt
-outputs/stage2_bilinear/metrics.json
-outputs/stage2_bilinear/validation_predictions.csv
+linear    0.25032231
+bilinear  0.25070280
+mlp       0.25137261
 ```
+
+CatBoost의 첫 기준은 linear latent baseline `0.25032231`을 안정적으로 이기는지입니다.
 
 ## Legacy / diagnostic experiments
 
-`evaluate_knn.py`, `build_stage2_dataset.py`, `src/stage2.py`, `src/stage2_regularized.py`는 latent neighborhood와 local-probability 실험을 재현하기 위해 유지합니다. 현재 bilinear 실험에는 사용하지 않습니다.
+`evaluate_knn.py`, `build_stage2_dataset.py`, `src/stage2.py`, `src/stage2_regularized.py`는 latent neighborhood와 local-probability 실험을 재현하기 위해 유지합니다.
 
 ```bash
 python scripts/evaluate_knn.py --config configs/default.yaml
