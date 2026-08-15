@@ -86,10 +86,7 @@ stage2_dataset:
   query_batch_size: 2048
   use_gpu_if_available: true
 
-# Current Stage 2 experiment (2026-08-15):
-# frozen VAE posterior means c=16D context, h=16D history.
-# g=Bilinear(c,h)->16D, then [c,h,g] 48D -> Linear(1) -> sigmoid.
-# train_stage2.py --head linear / --head mlp 로 기존 baseline도 그대로 비교할 수 있다.
+# Neural Stage 2 probes kept for controlled comparison.
 stage2:
   interaction_dim: 16
   hidden_dims: [64, 32]
@@ -102,3 +99,19 @@ stage2:
   weight_decay: 0.0
   threshold: 0.5
   num_workers: 0
+
+# Current Stage 2 experiment (2026-08-15):
+# frozen context/history posterior means only (32 numeric dimensions) -> CatBoost.
+# No raw columns, IDs, local probability, calibration, or 2024 holdout are used here.
+# Training objective is Logloss; early stopping/model selection uses validation BrierScore.
+stage2_catboost:
+  iterations: 2000
+  learning_rate: 0.03
+  depth: 6
+  l2_leaf_reg: 10.0
+  random_strength: 1.0
+  early_stopping_rounds: 100
+  task_type: GPU
+  devices: "0"
+  verbose: 50
+  threshold: 0.5
