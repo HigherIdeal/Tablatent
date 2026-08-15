@@ -6,33 +6,15 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import roc_auc_score
 
+from .canonical_features import (
+    CANONICAL_CATEGORICAL,
+    CANONICAL_FEATURES,
+    EXACT_REDUNDANT_ENGINEERED,
+    EXACT_REDUNDANT_OFFICIAL,
+    validate_canonical_schema,
+)
 from .data import load_frame, split_masks
 from .utils import save_json, seed_everything
-
-
-DEFAULT_ID_COLUMNS = [
-    "row_id",
-    "pitcher_id",
-    "batter_id",
-    "pitcher_team_id",
-    "batter_team_id",
-]
-
-DEFAULT_CATEGORICAL_COLUMNS = [
-    "game_month",
-    "game_dayofweek",
-    "top_bottom",
-    "game_type",
-    "balls_before",
-    "strikes_before",
-    "outs_before",
-    "runner_on_1b",
-    "runner_on_2b",
-    "runner_on_3b",
-    "base_state",
-    "pitcher_hand",
-    "batter_hand",
-]
 
 
 def _binary_metrics(y: np.ndarray, p: np.ndarray, threshold: float) -> dict:
@@ -53,14 +35,10 @@ def _binary_metrics(y: np.ndarray, p: np.ndarray, threshold: float) -> dict:
     }
 
 
-def _prepare_features(
-    frame: pd.DataFrame,
-    feature_columns: list[str],
-    categorical_columns: list[str],
-) -> pd.DataFrame:
-    x = frame.loc[:, feature_columns].copy()
-    categorical_set = set(categorical_columns)
-    for col in feature_columns:
+def _prepare_features(frame: pd.DataFrame) -> pd.DataFrame:
+    x = frame.loc[:, CANONICAL_FEATURES].copy()
+    categorical_set = set(CANONICAL_CATEGORICAL)
+    for col in CANONICAL_FEATURES:
         if col in categorical_set:
             x[col] = x[col].astype("string").fillna("<MISSING>").astype(str)
         else:
@@ -70,7 +48,7 @@ def _prepare_features(
 
 
 def train_raw_catboost(config: dict) -> dict:
-    """Raw train.csv CatBoost baseline using every non-target feature except IDs."""
+    """CatBoost baseline on the canonical, exactly de-duplicated raw feature set."""
     try:
         import catboost
         from catboost import CatBoostClassifier, Pool
@@ -81,49 +59,18 @@ def train_raw_catboost(config: dict) -> dict:
 
     seed_everything(config["seed"])
     frame = load_frame(config)
+    invariant_check = validate_canonical_schema(frame)
     split = split_masks(frame, config)
 
-    cfg = config.get("raw_catboost", {})
     target_col = config["data"]["target_col"]
-    id_columns = list(cfg.get("exclude_id_columns", DEFAULT_ID_COLUMNS))
-    excluded = set(id_columns + [target_col])
-    missing_ids = [col for col in id_columns if col not in frame.columns]
-    if missing_ids:
-        raise ValueError(f"configured ID columns missing from data: {missing_ids}")
-
-    feature_columns = [col for col in frame.columns if col not in excluded]
-    if not feature_columns:
-        raise ValueError("no raw CatBoost features remain after exclusions")
-
-    requested_categorical = list(
-        cfg.get("categorical_columns", DEFAULT_CATEGORICAL_COLUMNS)
-    )
-    categorical_columns = [
-        col for col in requested_categorical if col in feature_columns
-    ]
-
-    unlisted_object = [
-        col
-        for col in feature_columns
-        if col not in categorical_columns
-        and (
-            pd.api.types.is_object_dtype(frame[col].dtype)
-            or isinstance(frame[col].dtype, pd.StringDtype)
-            or isinstance(frame[col].dtype, pd.CategoricalDtype)
-        )
-    ]
-    if unlisted_object:
-        raise ValueError(
-            "raw_catboost.categorical_columns에 추가해야 하는 문자열 컬럼: "
-            + ", ".join(unlisted_object)
-        )
+    cfg = config.get("raw_catboost", {})
 
     train_mask = split["train"]
     val_mask = split["val"]
     train_frame = frame.loc[train_mask]
     val_frame = frame.loc[val_mask]
-    train_x = _prepare_features(train_frame, feature_columns, categorical_columns)
-    val_x = _prepare_features(val_frame, feature_columns, categorical_columns)
+    train_x = _prepare_features(train_frame)
+    val_x = _prepare_features(val_frame)
     train_y = pd.to_numeric(train_frame[target_col], errors="raise").to_numpy(
         dtype=np.float32
     )
@@ -134,14 +81,14 @@ def train_raw_catboost(config: dict) -> dict:
     train_pool = Pool(
         train_x,
         label=train_y,
-        cat_features=categorical_columns,
-        feature_names=feature_columns,
+        cat_features=CANONICAL_CATEGORICAL,
+        feature_names=CANONICAL_FEATURES,
     )
     val_pool = Pool(
         val_x,
         label=val_y,
-        cat_features=categorical_columns,
-        feature_names=feature_columns,
+        cat_features=CANONICAL_CATEGORICAL,
+        feature_names=CANONICAL_FEATURES,
     )
 
     threshold = float(cfg.get("threshold", 0.5))
@@ -169,12 +116,20 @@ def train_raw_catboost(config: dict) -> dict:
     model = CatBoostClassifier(**params)
 
     print(
-        f"[Raw CatBoost] train={len(train_x):,}, val={len(val_x):,}, "
-        f"features={len(feature_columns)}, categorical={len(categorical_columns)}, "
+        f"[Canonical Raw CatBoost] train={len(train_x):,}, val={len(val_x):,}, "
+        f"features={len(CANONICAL_FEATURES)}, categorical={len(CANONICAL_CATEGORICAL)}, "
         f"task_type={task_type}, catboost={catboost.__version__}"
     )
-    print(f"[Raw CatBoost] excluded IDs: {', '.join(id_columns)}")
-    print("[Raw CatBoost] Stage1 latent is NOT used; raw non-ID columns only")
+    print("[Canonical Raw CatBoost] pitcher_id/batter_id excluded from prior ablation")
+    print(
+        "[Canonical Raw CatBoost] exact redundant official columns removed: "
+        + ", ".join(EXACT_REDUNDANT_OFFICIAL)
+    )
+    print(
+        "[Canonical Raw CatBoost] exact engineered transforms removed: "
+        + ", ".join(EXACT_REDUNDANT_ENGINEERED)
+    )
+    print("[Canonical Raw CatBoost] exact redundancy invariants: OK")
 
     model.fit(
         train_pool,
@@ -195,13 +150,13 @@ def train_raw_catboost(config: dict) -> dict:
     best_zero = int(model.get_best_iteration())
     best_iteration = best_zero + 1 if best_zero >= 0 else None
 
-    output_dir = Path(config["paths"]["output_dir"]) / "raw_catboost"
+    output_dir = Path(config["paths"]["output_dir"]) / "raw_catboost_canonical"
     output_dir.mkdir(parents=True, exist_ok=True)
     model.save_model(str(output_dir / "raw_catboost.cbm"))
 
     importance = model.get_feature_importance(type="FeatureImportance")
     pd.DataFrame(
-        {"feature": feature_columns, "importance": np.asarray(importance, dtype=float)}
+        {"feature": CANONICAL_FEATURES, "importance": np.asarray(importance, dtype=float)}
     ).sort_values("importance", ascending=False).to_csv(
         output_dir / "feature_importance.csv", index=False
     )
@@ -217,21 +172,20 @@ def train_raw_catboost(config: dict) -> dict:
     )
     row_id_col = config["data"].get("row_id_col")
     if row_id_col and row_id_col in frame.columns:
-        pred_frame.insert(
-            1,
-            row_id_col,
-            frame.loc[val_mask, row_id_col].to_numpy(),
-        )
+        pred_frame.insert(1, row_id_col, frame.loc[val_mask, row_id_col].to_numpy())
     pred_frame.to_csv(output_dir / "validation_predictions.csv", index=False)
 
     result = {
-        "model": "CatBoostClassifier",
+        "model": "Canonical CatBoostClassifier",
         "catboost_version": catboost.__version__,
-        "input": "raw train.csv features excluding target and configured ID columns",
-        "feature_count": len(feature_columns),
-        "feature_columns": feature_columns,
-        "categorical_columns": categorical_columns,
-        "excluded_id_columns": id_columns,
+        "input": "canonical raw features with exact deterministic redundancy removed",
+        "feature_count": len(CANONICAL_FEATURES),
+        "feature_columns": CANONICAL_FEATURES,
+        "categorical_columns": CANONICAL_CATEGORICAL,
+        "excluded_identity_columns": ["row_id", "pitcher_id", "batter_id"],
+        "removed_exact_official": EXACT_REDUNDANT_OFFICIAL,
+        "removed_exact_engineered": EXACT_REDUNDANT_ENGINEERED,
+        "invariant_check": invariant_check,
         "train_rows": int(len(train_x)),
         "val_rows": int(len(val_x)),
         "best_iteration": best_iteration,
@@ -244,7 +198,7 @@ def train_raw_catboost(config: dict) -> dict:
     }
     save_json(result, output_dir / "metrics.json")
 
-    print("\n[Raw CatBoost validation]")
+    print("\n[Canonical Raw CatBoost validation]")
     print(f"best iteration             : {best_iteration}")
     print(f"validation BCE             : {metrics['bce']:.8f}")
     print(f"validation Brier           : {metrics['brier']:.8f}")
