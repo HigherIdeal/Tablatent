@@ -1,8 +1,19 @@
 from __future__ import annotations
 
+import importlib
+import sys
+from pathlib import Path
+
 import pandas as pd
 
-from scripts.run_dual_track_late2024_screen import make_masks
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS = ROOT / "scripts"
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+screen = importlib.import_module("run_dual_track_late2024_screen")
 
 
 def test_make_masks_uses_2023_plus_early_2024_for_recent() -> None:
@@ -12,7 +23,7 @@ def test_make_masks_uses_2023_plus_early_2024_for_recent() -> None:
             "game_month": [9, 4, 9, 4, 7, 8, 10],
         }
     )
-    recent, stable, valid = make_masks(
+    recent, stable, valid = screen.make_masks(
         frame,
         season_col="season",
         month_col="game_month",
@@ -32,7 +43,7 @@ def test_masks_are_disjoint_from_late_holdout() -> None:
             "game_month": [5, 10, 7, 8],
         }
     )
-    recent, stable, valid = make_masks(
+    recent, stable, valid = screen.make_masks(
         frame,
         season_col="season",
         month_col="game_month",
