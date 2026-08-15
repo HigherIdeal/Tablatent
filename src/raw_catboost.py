@@ -7,10 +7,12 @@ import pandas as pd
 from sklearn.metrics import roc_auc_score
 
 from .canonical_features import (
+    APPROX_REDUNDANT_OFFICIAL,
     CANONICAL_CATEGORICAL,
     CANONICAL_FEATURES,
     EXACT_REDUNDANT_ENGINEERED,
     EXACT_REDUNDANT_OFFICIAL,
+    add_canonical_derived_features,
     validate_canonical_schema,
 )
 from .data import load_frame, split_masks
@@ -48,7 +50,7 @@ def _prepare_features(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def train_raw_catboost(config: dict) -> dict:
-    """CatBoost baseline on the canonical, exactly de-duplicated raw feature set."""
+    """CatBoost baseline on the canonical de-duplicated feature set."""
     try:
         import catboost
         from catboost import CatBoostClassifier, Pool
@@ -60,6 +62,7 @@ def train_raw_catboost(config: dict) -> dict:
     seed_everything(config["seed"])
     frame = load_frame(config)
     invariant_check = validate_canonical_schema(frame)
+    add_canonical_derived_features(frame)
     split = split_masks(frame, config)
 
     target_col = config["data"]["target_col"]
@@ -126,10 +129,14 @@ def train_raw_catboost(config: dict) -> dict:
         + ", ".join(EXACT_REDUNDANT_OFFICIAL)
     )
     print(
+        "[Canonical Raw CatBoost] normalized approximate duplicates: "
+        + ", ".join(APPROX_REDUNDANT_OFFICIAL)
+    )
+    print(
         "[Canonical Raw CatBoost] exact engineered transforms removed: "
         + ", ".join(EXACT_REDUNDANT_ENGINEERED)
     )
-    print("[Canonical Raw CatBoost] exact redundancy invariants: OK")
+    print("[Canonical Raw CatBoost] canonical redundancy invariants: OK")
 
     model.fit(
         train_pool,
@@ -178,12 +185,13 @@ def train_raw_catboost(config: dict) -> dict:
     result = {
         "model": "Canonical CatBoostClassifier",
         "catboost_version": catboost.__version__,
-        "input": "canonical raw features with exact deterministic redundancy removed",
+        "input": "canonical features with deterministic/rounding redundancy normalized",
         "feature_count": len(CANONICAL_FEATURES),
         "feature_columns": CANONICAL_FEATURES,
         "categorical_columns": CANONICAL_CATEGORICAL,
         "excluded_identity_columns": ["row_id", "pitcher_id", "batter_id"],
         "removed_exact_official": EXACT_REDUNDANT_OFFICIAL,
+        "normalized_approx_official": APPROX_REDUNDANT_OFFICIAL,
         "removed_exact_engineered": EXACT_REDUNDANT_ENGINEERED,
         "invariant_check": invariant_check,
         "train_rows": int(len(train_x)),
