@@ -4,9 +4,11 @@ import numpy as np
 import pandas as pd
 
 
+PITCHER_TEAM_WIN_EXPECTANCY = "pitcher_team_win_expectancy"
+
 # Canonical CatBoost feature policy.
 # Keep one representation when another official/engineered column can be
-# reconstructed exactly from it. Near-duplicates are intentionally retained.
+# reconstructed exactly, or differs only by tolerated display/rounding noise.
 CANONICAL_FEATURES = [
     "season", "game_month", "game_dayofweek", "inning", "top_bottom", "game_type",
     "balls_before", "strikes_before", "outs_before",
@@ -15,9 +17,8 @@ CANONICAL_FEATURES = [
     "run_total_before", "score_diff_home",
     # Base occupancy: base_state exactly recovers all three runner flags and count.
     "base_state",
-    # Win expectancies are only approximately complementary because of rounding,
-    # so both remain. LI is separate information.
-    "home_win_expectancy", "away_win_expectancy", "li",
+    # Normalize home/away win expectancy to the pitching team's perspective.
+    PITCHER_TEAM_WIN_EXPECTANCY, "li",
     # Entity IDs: pitcher_id/batter_id are excluded by the completed ablation;
     # team IDs remain until their own evidence is decisive.
     "pitcher_hand", "batter_hand", "pitcher_team_id", "batter_team_id",
@@ -44,6 +45,11 @@ CANONICAL_CATEGORICAL = [
     "pitcher_hand", "batter_hand", "pitcher_team_id", "batter_team_id",
 ]
 
+# Raw columns required to construct the canonical feature set.
+CANONICAL_SOURCE_COLUMNS = [
+    "home_win_expectancy", "away_win_expectancy",
+]
+
 # Exact deterministic duplicates that must not enter the canonical model.
 EXACT_REDUNDANT_OFFICIAL = {
     "run_top_before": "recoverable from run_total_before and score_diff_home",
@@ -54,6 +60,14 @@ EXACT_REDUNDANT_OFFICIAL = {
     "runner_on_3b": "recoverable from base_state",
     "num_runners_on": "recoverable from base_state",
     "asof_pitcher_pitchmix_n": "exactly identical to asof_pitcher_n in audited train data",
+}
+
+# Semantically redundant official columns. They are not bit-exact complements due
+# to rounding, but the user-approved policy is to keep one pitcher-perspective
+# value instead of both home/away encodings.
+APPROX_REDUNDANT_OFFICIAL = {
+    "home_win_expectancy": "normalized into pitcher_team_win_expectancy using top_bottom",
+    "away_win_expectancy": "normalized into pitcher_team_win_expectancy using top_bottom",
 }
 
 # These were used by the older H2/J0-style experiment, but are exact transforms
@@ -73,7 +87,6 @@ EXACT_REDUNDANT_ENGINEERED = {
 
 # Deliberately NOT pruned because the audit did not establish exact equality.
 NON_EXACT_OVERLAPS = {
-    "home_win_expectancy / away_win_expectancy": "approximately complementary; rounding breaks exact recovery",
     "fastball / breaking / offspeed rates": "sum is not exactly one for many rows; an unrepresented remainder can exist",
 }
 
@@ -89,18 +102,46 @@ BASE_STATE_TO_FLAGS = {
 }
 
 
-def validate_canonical_schema(frame: pd.DataFrame) -> dict[str, int]:
+def add_canonical_derived_features(frame: pd.DataFrame) -> None:
+    """Add canonical derived features in-place from official source columns.
+
+    In the top half (T), the away team bats and the home team pitches, so the
+    pitcher's team win expectancy is home_win_expectancy. In the bottom half
+    (B), the home team bats and the away team pitches, so it is
+    away_win_expectancy.
+    """
+    required = {"top_bottom", "home_win_expectancy", "away_win_expectancy"}
+    missing = sorted(required - set(frame.columns))
+    if missing:
+        raise ValueError(f"Missing columns for canonical derived features: {missing}")
+
+    top_bottom = frame["top_bottom"].astype(str)
+    unknown = sorted(set(top_bottom.unique()) - {"T", "B"})
+    if unknown:
+        raise ValueError(f"Unexpected top_bottom values: {unknown}")
+
+    home = pd.to_numeric(frame["home_win_expectancy"], errors="coerce")
+    away = pd.to_numeric(frame["away_win_expectancy"], errors="coerce")
+    frame[PITCHER_TEAM_WIN_EXPECTANCY] = np.where(top_bottom.eq("T"), home, away)
+
+
+def validate_canonical_schema(frame: pd.DataFrame) -> dict[str, int | float]:
     """Assert exact redundancy assumptions before training/ablation.
 
-    This is intentionally strict: if a future dataset violates an invariant used
-    for pruning, the run stops instead of silently discarding information.
+    This is intentionally strict for exact invariants. Home/away win expectancy
+    complement differences are treated as tolerated rounding noise and reported,
+    not failed.
     """
-    required = set(CANONICAL_FEATURES) | set(EXACT_REDUNDANT_OFFICIAL)
+    required = (
+        (set(CANONICAL_FEATURES) - {PITCHER_TEAM_WIN_EXPECTANCY})
+        | set(CANONICAL_SOURCE_COLUMNS)
+        | set(EXACT_REDUNDANT_OFFICIAL)
+    )
     missing = sorted(required - set(frame.columns))
     if missing:
         raise ValueError(f"Missing columns required by canonical feature audit: {missing}")
 
-    mismatches: dict[str, int] = {}
+    mismatches: dict[str, int | float] = {}
 
     run_total = pd.to_numeric(frame["run_total_before"], errors="raise").to_numpy(np.int64)
     score_diff = pd.to_numeric(frame["score_diff_home"], errors="raise").to_numpy(np.int64)
@@ -142,7 +183,21 @@ def validate_canonical_schema(frame: pd.DataFrame) -> dict[str, int]:
     ).to_numpy(np.int64)
     mismatches["pitchmix_n"] = int(np.count_nonzero(pitchmix_n != pitcher_n))
 
-    failed = {k: v for k, v in mismatches.items() if v != 0}
+    # Diagnostic only: home/away are intended complements but can differ by rounding.
+    home = pd.to_numeric(frame["home_win_expectancy"], errors="coerce").to_numpy(float)
+    away = pd.to_numeric(frame["away_win_expectancy"], errors="coerce").to_numpy(float)
+    complement_error = np.abs(home + away - 1.0)
+    finite = np.isfinite(complement_error)
+    mismatches["win_expectancy_max_complement_error"] = (
+        float(complement_error[finite].max()) if finite.any() else float("nan")
+    )
+
+    exact_keys = [
+        "run_total", "score_diff_home", "score_parity", "score_diff_pitcher_team",
+        "unknown_base_state", "runner_on_1b", "runner_on_2b", "runner_on_3b",
+        "num_runners_on", "pitchmix_n",
+    ]
+    failed = {k: mismatches[k] for k in exact_keys if mismatches.get(k, 0) != 0}
     if failed:
         raise ValueError(
             "Canonical feature pruning invariant failed; refusing to drop information: "
