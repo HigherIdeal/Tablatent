@@ -73,9 +73,13 @@ def train_stage2(config: dict) -> dict:
     task_type = str(cfg.get("task_type", "GPU")).upper()
     devices = str(cfg.get("devices", "0"))
 
+    # BrierScore is our primary reported probability metric, but CatBoost does not
+    # provide GPU support for it as a training/eval metric. Keep the GPU probe fast
+    # and reproducible by selecting trees with Logloss, then compute Brier exactly
+    # from validation probabilities after training.
     params = {
         "loss_function": "Logloss",
-        "eval_metric": "BrierScore",
+        "eval_metric": "Logloss",
         "iterations": int(cfg.get("iterations", 2000)),
         "learning_rate": float(cfg.get("learning_rate", 0.03)),
         "depth": int(cfg.get("depth", 6)),
@@ -100,9 +104,9 @@ def train_stage2(config: dict) -> dict:
         f"latent_dim={z.shape[1]}, task_type={task_type}, catboost={catboost.__version__}"
     )
     print(
-        "[CatBoost Stage2] frozen posterior means only: "
-        "context(16D) + history(16D) -> CatBoostClassifier; "
-        "loss=Logloss, selection=BrierScore"
+        f"[CatBoost Stage2] frozen posterior means only: context({context_dim}D) + "
+        f"history({history_dim}D) -> CatBoostClassifier; "
+        "loss/selection=Logloss, reported primary metric=Brier"
     )
 
     model.fit(
@@ -130,9 +134,9 @@ def train_stage2(config: dict) -> dict:
     best_iteration = best_iteration_zero_based + 1 if best_iteration_zero_based >= 0 else None
     output_dir = Path(config["paths"]["output_dir"]) / "stage2_catboost"
     output_dir.mkdir(parents=True, exist_ok=True)
-    model.save_model(output_dir / "stage2_catboost.cbm")
+    model.save_model(str(output_dir / "stage2_catboost.cbm"))
 
-    importance = model.get_feature_importance(train_pool, type="FeatureImportance")
+    importance = model.get_feature_importance(type="FeatureImportance")
     importance_frame = pd.DataFrame(
         {"feature": feature_names, "importance": np.asarray(importance, dtype=float)}
     ).sort_values("importance", ascending=False)
@@ -163,7 +167,8 @@ def train_stage2(config: dict) -> dict:
         "val_rows": int(len(val_z)),
         "best_iteration": best_iteration,
         "tree_count": int(model.tree_count_),
-        "selection_metric": "validation BrierScore",
+        "selection_metric": "validation Logloss",
+        "primary_report_metric": "validation Brier computed from predict_proba",
         "training_loss": "Logloss",
         "validation": metrics,
         "baseline": {
