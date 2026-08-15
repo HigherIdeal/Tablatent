@@ -81,7 +81,7 @@ control_success probability
 - 2024 holdout 미사용
 - latent standardization 미사용
 
-학습 objective는 `Logloss`, validation/model selection은 `BrierScore`입니다.
+GPU 학습과 early stopping은 `Logloss`를 사용하고, 최종 선택된 모델의 `predict_proba`로 validation Brier를 별도로 계산해 주 평가값으로 기록합니다.
 
 ```bash
 python scripts/train_stage2.py --config configs/default.yaml --head catboost
