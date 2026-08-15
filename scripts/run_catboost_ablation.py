@@ -273,7 +273,7 @@ def run_ablation(
             )
             print(
                 f"       brier={metric['brier']:.8f} "
-                f"skill={metric['brier_skill']:+.3e} "
+                f"score={metric['competition_score']:.2f} "
                 f"auc={metric['auc']:.5f} "
                 f"p_std={metric['prediction_std']:.5f}"
             )
@@ -307,7 +307,7 @@ def run_ablation(
             worst_brier=("brier", "max"),
             mean_delta_brier=("delta_brier_vs_reference", "mean"),
             worst_delta_brier=("delta_brier_vs_reference", "max"),
-            mean_skill=("brier_skill", "mean"),
+            mean_competition_score=("competition_score", "mean"),
             mean_auc=("auc", "mean"),
             mean_prediction_std=("prediction_std", "mean"),
         )
@@ -333,8 +333,8 @@ def run_ablation(
 
     print("\n[Canonical Ablation summary] lower mean_delta_brier is better")
     display_columns = [
-        "variant", "feature_count", "mean_brier", "mean_delta_brier",
-        "worst_delta_brier", "mean_auc",
+        "variant", "feature_count", "mean_brier", "mean_competition_score",
+        "mean_delta_brier", "worst_delta_brier", "mean_auc",
     ]
     print(summary[display_columns].to_string(index=False))
     print(f"\nSaved: {output_dir / 'summary.csv'}")
