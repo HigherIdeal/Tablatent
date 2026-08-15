@@ -5,6 +5,7 @@ outputs/logs/*
 !outputs/checkpoints/.gitkeep
 !outputs/latents/.gitkeep
 !outputs/logs/.gitkeep
+dist/
 __pycache__/
 *.py[cod]
 .ipynb_checkpoints/
