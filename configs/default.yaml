@@ -113,31 +113,15 @@ stage2_catboost:
   verbose: 50
   threshold: 0.5
 
-# Direct raw-feature control baseline.
-# Uses every original train.csv column except target + IDs below.
-# In particular, season and all asof/context statistics remain as raw inputs.
-# Stage1/VAE latent is not used.
+# Direct CatBoost control baseline on src/canonical_features.py.
+# Exact deterministic duplicates are removed before training:
+# - score state keeps run_total_before + score_diff_home only
+# - runner state keeps base_state only
+# - asof_pitcher_pitchmix_n is removed because it equals asof_pitcher_n
+# - EB/log/reliability transforms are not duplicated alongside their raw sources
+# - pitcher_id and batter_id stay excluded based on the completed temporal ablation
+# Near-duplicates that are not exactly reconstructable remain available.
 raw_catboost:
-  exclude_id_columns:
-    - row_id
-    - pitcher_id
-    - batter_id
-    - pitcher_team_id
-    - batter_team_id
-  categorical_columns:
-    - game_month
-    - game_dayofweek
-    - top_bottom
-    - game_type
-    - balls_before
-    - strikes_before
-    - outs_before
-    - runner_on_1b
-    - runner_on_2b
-    - runner_on_3b
-    - base_state
-    - pitcher_hand
-    - batter_hand
   iterations: 3000
   learning_rate: 0.03
   depth: 6
