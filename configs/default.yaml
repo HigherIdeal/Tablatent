@@ -103,7 +103,8 @@ stage2:
 # Current Stage 2 experiment (2026-08-15):
 # frozen context/history posterior means only (32 numeric dimensions) -> CatBoost.
 # No raw columns, IDs, local probability, calibration, or 2024 holdout are used here.
-# Training objective is Logloss; early stopping/model selection uses validation BrierScore.
+# GPU training/early stopping uses Logloss. Validation Brier is computed exactly
+# from predict_proba after the selected model is restored.
 stage2_catboost:
   iterations: 2000
   learning_rate: 0.03
