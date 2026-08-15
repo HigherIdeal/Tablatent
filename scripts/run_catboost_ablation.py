@@ -15,11 +15,15 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.canonical_features import (
+    APPROX_REDUNDANT_OFFICIAL,
     CANONICAL_CATEGORICAL,
     CANONICAL_FEATURES,
+    CANONICAL_SOURCE_COLUMNS,
     EXACT_REDUNDANT_ENGINEERED,
     EXACT_REDUNDANT_OFFICIAL,
     NON_EXACT_OVERLAPS,
+    PITCHER_TEAM_WIN_EXPECTANCY,
+    add_canonical_derived_features,
     validate_canonical_schema,
 )
 from src.data import load_frame
@@ -38,7 +42,8 @@ GROUPS = {
     "count": ["balls_before", "strikes_before", "outs_before"],
     "score": ["run_total_before", "score_diff_home"],
     "base_state": ["base_state"],
-    "leverage": ["home_win_expectancy", "away_win_expectancy", "li"],
+    "leverage": [PITCHER_TEAM_WIN_EXPECTANCY, "li"],
+    "win_expectancy": [PITCHER_TEAM_WIN_EXPECTANCY],
     "handedness": ["pitcher_hand", "batter_hand"],
     "pitcher_profile": [
         "asof_pitcher_n", "asof_pitcher_success_rate",
@@ -75,6 +80,7 @@ DEFAULT_VARIANTS = [
     "drop_count",
     "drop_score",
     "drop_base_state",
+    "drop_win_expectancy",
     "drop_leverage",
     "drop_handedness",
     "drop_pitcher_profile",
@@ -151,12 +157,16 @@ def run_ablation(
     season = config["data"]["season_col"]
     row_id = config["data"].get("row_id_col", "row_id")
 
-    required = set(CANONICAL_FEATURES + [target, season, row_id, "pitcher_id", "batter_id"])
+    raw_canonical = [f for f in CANONICAL_FEATURES if f != PITCHER_TEAM_WIN_EXPECTANCY]
+    required = set(raw_canonical + CANONICAL_SOURCE_COLUMNS + [
+        target, season, row_id, "pitcher_id", "batter_id"
+    ])
     missing = sorted(required - set(frame.columns))
     if missing:
         raise ValueError(f"Missing raw columns: {missing}")
 
     invariant_check = validate_canonical_schema(frame)
+    add_canonical_derived_features(frame)
     frame = frame.sort_values([season, "game_month", row_id]).reset_index(drop=True)
 
     output_dir = Path(config["paths"]["output_dir"]) / "catboost_ablation_canonical"
@@ -173,7 +183,11 @@ def run_ablation(
     )
     print(
         f"[Canonical Ablation] reference features={len(CANONICAL_FEATURES)}; "
-        "exact deterministic redundancy removed"
+        "deterministic/rounding redundancy normalized"
+    )
+    print(
+        "[Canonical Ablation] home/away win expectancy -> "
+        "pitcher_team_win_expectancy"
     )
     print("[Canonical Ablation] invariants: OK")
     print("[Canonical Ablation] pitcher_id/batter_id excluded in reference; add-back variants test them")
@@ -303,9 +317,10 @@ def run_ablation(
     summary.to_csv(output_dir / "summary.csv", index=False)
 
     run_config = {
-        "reference": "canonical exact-deduplicated official feature set",
+        "reference": "canonical de-duplicated feature set",
         "canonical_features": CANONICAL_FEATURES,
         "removed_exact_official": EXACT_REDUNDANT_OFFICIAL,
+        "normalized_approx_official": APPROX_REDUNDANT_OFFICIAL,
         "removed_exact_engineered": EXACT_REDUNDANT_ENGINEERED,
         "retained_non_exact_overlaps": NON_EXACT_OVERLAPS,
         "invariant_check": invariant_check,
@@ -336,7 +351,7 @@ def parse_strings(value: str) -> list[str]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Ablate the canonical exactly de-duplicated CatBoost feature set."
+        description="Ablate the canonical de-duplicated CatBoost feature set."
     )
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--folds", default="2023,2024")
