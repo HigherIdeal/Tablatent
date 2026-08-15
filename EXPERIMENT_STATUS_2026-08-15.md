@@ -70,3 +70,26 @@ Preferred formulation:
 This is preferred over a simple Hadamard product because the same latent coordinates of the independently trained context/history VAEs are not guaranteed to be semantically aligned. The bilinear layer can learn which context and history dimensions should interact.
 
 Do not delete the existing linear baseline. Compare all Stage 2 probes under the same frozen Stage-1 latent and the same temporal split.
+
+## Implementation status
+
+Bilinear Stage 2 is implemented and is now the default `train_stage2.py` head. Existing probes remain selectable.
+
+```bash
+python scripts/train_stage2.py --config configs/default.yaml --head bilinear
+python scripts/train_stage2.py --config configs/default.yaml --head linear
+python scripts/train_stage2.py --config configs/default.yaml --head mlp
+```
+
+For Colab session loss, Stage 1 artifacts and `data/processed/train.pkl` can be persisted to Google Drive and restored before Stage 2.
+
+```bash
+# immediately after Stage 1
+python scripts/stage1_cache.py push
+
+# in a new Colab session
+python scripts/stage1_cache.py pull
+python scripts/train_stage2.py --config configs/default.yaml --head bilinear
+```
+
+The cache uses a SHA256 manifest and defaults to `/content/drive/MyDrive/Tablatent/stage1_cache`.
