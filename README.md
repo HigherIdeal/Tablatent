@@ -98,6 +98,16 @@ outputs/stage2_catboost/validation_predictions.csv
 outputs/stage2_catboost/feature_importance.csv
 ```
 
+현재 2023 validation 결과:
+
+```text
+best iteration  23
+BCE             0.69242962
+Brier           0.24964003
+AUC             0.530320
+official-style  143.99
+```
+
 ## Stage 2 comparison probes
 
 기존 probe는 삭제하지 않고 같은 frozen latent와 temporal split에서 비교합니다.
@@ -111,12 +121,44 @@ python scripts/train_stage2.py --config configs/default.yaml --head bilinear
 현재 기록된 validation Brier:
 
 ```text
-linear    0.25032231
-bilinear  0.25070280
-mlp       0.25137261
+CatBoost   0.24964003
+linear     0.25032231
+bilinear   0.25070280
+mlp        0.25137261
 ```
 
-CatBoost의 첫 기준은 linear latent baseline `0.25032231`을 안정적으로 이기는지입니다.
+## Diagnostic leaderboard submission
+
+현재 CatBoost-on-latent 모델을 실제 2025 evaluator에서 확인하기 위한 진단용 `submit.zip`을 만들 수 있습니다. 이 패키지는 현재 개발 artifact를 그대로 사용하며 **최종 2019~2024 재학습 모델이 아닙니다.**
+
+```powershell
+python scripts/build_submission.py
+```
+
+출력:
+
+```text
+dist/submit.zip
+```
+
+ZIP 최상위 구조는 DACON 코드 제출 형식에 맞게 고정됩니다.
+
+```text
+submit.zip
+├─ model/
+├─ script.py
+└─ requirements.txt
+```
+
+`model/`에는 현재 Stage1 context/history VAE checkpoint, train-fit preprocessor, CatBoost Stage2 모델과 inference에 필요한 최소 `src` 정의만 포함합니다. `script.py`는 서버의 `test.csv` 각 행을 학습 당시 preprocessor로 변환해 32D posterior mean을 만들고 CatBoost 확률을 계산한 뒤 `output/submission.csv`를 생성합니다.
+
+공식 5행 샘플을 가진 로컬 디렉터리가 있으면 ZIP 생성 전에 end-to-end smoke test도 할 수 있습니다.
+
+```powershell
+python scripts/build_submission.py --smoke-data-dir "C:\path\to\official\data"
+```
+
+추론 패키지의 `requirements.txt`에는 평가 서버 기본 설치 패키지를 중복 설치하지 않고 `catboost==1.2.10`만 넣습니다.
 
 ## Legacy / diagnostic experiments
 
