@@ -1,9 +1,19 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
-from scripts.run_2025_proxy_validation import FoldSpec, _weighted_summary, fold_masks
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS = ROOT / "scripts"
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from run_2025_proxy_validation import FoldSpec, _weighted_summary, fold_masks
 
 
 def _frame() -> pd.DataFrame:
@@ -60,7 +70,7 @@ def test_late_2024_fold_expands_training_through_july() -> None:
 def test_weighted_summary_prefers_higher_weighted_score() -> None:
     rows = []
     weights = {"season_forward_2024": 0.5, "mid_2024": 0.2, "late_2024": 0.3}
-    for fold, weight in weights.items():
+    for fold in weights:
         rows.append(
             {
                 "fold": fold,
