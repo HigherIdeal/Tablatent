@@ -100,13 +100,45 @@ stage2:
   threshold: 0.5
   num_workers: 0
 
-# Current Stage 2 experiment (2026-08-15):
-# frozen context/history posterior means only (32 numeric dimensions) -> CatBoost.
-# No raw columns, IDs, local probability, calibration, or 2024 holdout are used here.
-# GPU training/early stopping uses Logloss. Validation Brier is computed exactly
-# from predict_proba after the selected model is restored.
+# Frozen Stage1 latent -> CatBoost probe.
 stage2_catboost:
   iterations: 2000
+  learning_rate: 0.03
+  depth: 6
+  l2_leaf_reg: 10.0
+  random_strength: 1.0
+  early_stopping_rounds: 100
+  task_type: GPU
+  devices: "0"
+  verbose: 50
+  threshold: 0.5
+
+# Direct raw-feature control baseline.
+# Uses every original train.csv column except target + IDs below.
+# In particular, season and all asof/context statistics remain as raw inputs.
+# Stage1/VAE latent is not used.
+raw_catboost:
+  exclude_id_columns:
+    - row_id
+    - pitcher_id
+    - batter_id
+    - pitcher_team_id
+    - batter_team_id
+  categorical_columns:
+    - game_month
+    - game_dayofweek
+    - top_bottom
+    - game_type
+    - balls_before
+    - strikes_before
+    - outs_before
+    - runner_on_1b
+    - runner_on_2b
+    - runner_on_3b
+    - base_state
+    - pitcher_hand
+    - batter_hand
+  iterations: 3000
   learning_rate: 0.03
   depth: 6
   l2_leaf_reg: 10.0
