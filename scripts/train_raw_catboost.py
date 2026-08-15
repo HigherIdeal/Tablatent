@@ -13,7 +13,7 @@ from src.utils import load_config
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Train CatBoost directly on raw non-ID train.csv features."
+        description="Train CatBoost on the canonical exactly de-duplicated raw feature set."
     )
     parser.add_argument("--config", default="configs/default.yaml")
     args = parser.parse_args()
