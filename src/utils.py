@@ -41,6 +41,11 @@ def ensure_output_dirs(output_dir: str | Path) -> dict[str, Path]:
 
 
 def save_json(obj, path: str | Path) -> None:
+    # Be tolerant of the common accidental call order save_json(path, obj).
+    # The canonical API remains save_json(obj, path).
+    if isinstance(obj, (str, Path)) and not isinstance(path, (str, Path)):
+        obj, path = path, obj
+
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
