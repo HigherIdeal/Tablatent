@@ -173,7 +173,8 @@ def apply_smoothed_probability(
         sort=False,
     )
     exact = merged["_prob"].notna().to_numpy()
-    probability = merged["_prob"].to_numpy(np.float64)
+    # pandas 2.x/3.x may expose a read-only NumPy view here; we mutate missing rows below.
+    probability = merged["_prob"].to_numpy(dtype=np.float64, copy=True)
     probability[~exact] = fallback[~exact]
     support = merged["_count"].fillna(0).to_numpy(np.float64)
 
