@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import math
 import sys
 from pathlib import Path
 
@@ -15,15 +14,12 @@ if str(ROOT) not in sys.path:
 import run_regime_atlas as atlas
 from src.utils import load_config, save_json
 
-
 YEARS = np.asarray([2019, 2020, 2021, 2022, 2023, 2024], dtype=np.int16)
 OLD_IDX = np.asarray([0, 1, 2, 3], dtype=np.int8)
 RECENT_IDX = np.asarray([4, 5], dtype=np.int8)
 CHANGE_YEARS = [2021, 2022, 2023]
 BIN_SETTINGS = [4, 6, 8]
 
-# Primary unresolved candidates after the controlled drilldown.
-# Numeric components are binned globally with target-independent quantiles.
 CANDIDATES: dict[str, tuple[str, str | None]] = {
     "fastball_rate_x_batter_hand": ("asof_pitcher_fastball_rate", "batter_hand"),
     "breaking_rate_x_batter_hand": ("asof_pitcher_breaking_rate", "batter_hand"),
@@ -39,7 +35,6 @@ def _select_backend(requested: str):
         try:
             import cupy as cp
 
-            # Force a tiny device operation so a broken CUDA/CuPy install falls back cleanly.
             _ = cp.asarray([1], dtype=cp.int8).sum().item()
             return cp, "cupy"
         except Exception as exc:
@@ -48,27 +43,17 @@ def _select_backend(requested: str):
     return np, "numpy"
 
 
-def _to_numpy(x):
-    if isinstance(x, np.ndarray):
-        return x
+def _to_numpy(value):
+    if isinstance(value, np.ndarray):
+        return value
     try:
         import cupy as cp
 
-        if isinstance(x, cp.ndarray):
-            return cp.asnumpy(x)
+        if isinstance(value, cp.ndarray):
+            return cp.asnumpy(value)
     except Exception:
         pass
-    return np.asarray(x)
-
-
-def _fmt_edge(value: float) -> str:
-    if abs(value) >= 100:
-        return f"{value:.0f}"
-    if abs(value) >= 10:
-        return f"{value:.1f}"
-    if abs(value) >= 1:
-        return f"{value:.2f}"
-    return f"{value:.4f}"
+    return np.asarray(value)
 
 
 def _numeric_codes(values, bins: int, xp):
@@ -79,10 +64,10 @@ def _numeric_codes(values, bins: int, xp):
     edges = xp.unique(xp.quantile(finite_values, xp.linspace(0.0, 1.0, bins + 1)))
     if int(edges.size) < 3:
         raise ValueError("numeric candidate has insufficient unique quantile edges")
-    effective_bins = int(edges.size) - 1
-    codes = xp.full(values.shape, effective_bins, dtype=xp.int16)  # missing bin
+    real_bins = int(edges.size) - 1
+    codes = xp.full(values.shape, real_bins, dtype=xp.int16)  # final code is missing
     codes[finite] = xp.searchsorted(edges[1:-1], values[finite], side="right").astype(xp.int16)
-    return codes, _to_numpy(edges).astype(float), effective_bins + 1
+    return codes, _to_numpy(edges).astype(float), real_bins + 1
 
 
 def _categorical_codes(series: pd.Series, xp):
@@ -91,65 +76,57 @@ def _categorical_codes(series: pd.Series, xp):
     return xp.asarray(codes, dtype=xp.int16), [str(x) for x in levels.tolist()]
 
 
-def _combine_codes(numeric_codes, n_numeric_groups: int, categorical_codes, levels: list[str] | None, xp):
+def _combine_codes(numeric_codes, n_numeric_groups: int, categorical_codes, levels, xp):
     if categorical_codes is None:
         return numeric_codes.astype(xp.int32), n_numeric_groups
-    n_cat = len(levels or [])
-    combined = numeric_codes.astype(xp.int32) * n_cat + categorical_codes.astype(xp.int32)
-    return combined, n_numeric_groups * n_cat
+    n_cat = len(levels)
+    codes = numeric_codes.astype(xp.int32) * n_cat + categorical_codes.astype(xp.int32)
+    return codes, n_numeric_groups * n_cat
 
 
 def _game_type_controlled_residual(y, year_idx, gt_codes, n_gt: int, xp):
     key = year_idx.astype(xp.int32) * n_gt + gt_codes.astype(xp.int32)
-    count = xp.bincount(key, minlength=6 * n_gt).astype(xp.float64)
-    total = xp.bincount(key, weights=y.astype(xp.float64), minlength=6 * n_gt)
-    mean = xp.divide(total, count, out=xp.zeros_like(total), where=count > 0)
-    return y - mean[key]
+    counts = xp.bincount(key, minlength=6 * n_gt).astype(xp.float64)
+    sums = xp.bincount(key, weights=y.astype(xp.float64), minlength=6 * n_gt)
+    means = xp.divide(sums, counts, out=xp.zeros_like(sums), where=counts > 0)
+    return y - means[key]
 
 
-def _profile_from_codes(
-    *,
-    response,
-    year_idx,
-    group_codes,
-    n_groups: int,
-    mask,
-    center_by_season: bool,
-    xp,
-) -> tuple[np.ndarray, np.ndarray]:
+def _profile_from_codes(*, response, year_idx, group_codes, n_groups: int, mask, center_by_season: bool, xp):
     valid = mask & (year_idx >= 0) & (year_idx < 6) & (group_codes >= 0)
     flat = year_idx[valid].astype(xp.int64) * n_groups + group_codes[valid].astype(xp.int64)
     resp = response[valid].astype(xp.float64)
     counts = xp.bincount(flat, minlength=6 * n_groups).reshape(6, n_groups).astype(xp.float64)
     sums = xp.bincount(flat, weights=resp, minlength=6 * n_groups).reshape(6, n_groups)
     means = xp.divide(sums, counts, out=xp.full_like(sums, xp.nan), where=counts > 0)
-
     if center_by_season:
-        season_counts = counts.sum(axis=1)
-        season_sums = sums.sum(axis=1)
+        season_count = counts.sum(axis=1)
+        season_sum = sums.sum(axis=1)
         season_mean = xp.divide(
-            season_sums,
-            season_counts,
-            out=xp.zeros_like(season_sums),
-            where=season_counts > 0,
+            season_sum,
+            season_count,
+            out=xp.zeros_like(season_sum),
+            where=season_count > 0,
         )
-        effects = means - season_mean[:, None]
-    else:
-        effects = means
-    return _to_numpy(counts), _to_numpy(effects)
+        means = means - season_mean[:, None]
+    return _to_numpy(counts), _to_numpy(means)
 
 
 def _era_aggregate(counts: np.ndarray, effects: np.ndarray, idx: np.ndarray):
-    c = counts[idx].sum(axis=0)
+    era_count = counts[idx].sum(axis=0)
     weighted = np.nansum(counts[idx] * effects[idx], axis=0)
-    e = np.divide(weighted, c, out=np.full_like(weighted, np.nan), where=c > 0)
-    return c, e
+    era_effect = np.divide(
+        weighted,
+        era_count,
+        out=np.full_like(weighted, np.nan),
+        where=era_count > 0,
+    )
+    return era_count, era_effect
 
 
 def _internal_rmse(counts: np.ndarray, effects: np.ndarray, idx: np.ndarray, era_effect: np.ndarray) -> float:
     c = counts[idx]
-    e = effects[idx]
-    diff = e - era_effect[None, :]
+    diff = effects[idx] - era_effect[None, :]
     mask = np.isfinite(diff) & (c > 0)
     denom = float(c[mask].sum())
     if denom <= 0:
@@ -165,7 +142,7 @@ def _era_shift(
     *,
     min_era_count: int,
     min_effect_for_flip: float = 0.002,
-) -> dict[str, float | int | np.ndarray]:
+) -> dict:
     left_count, left_effect = _era_aggregate(counts, effects, left_idx)
     right_count, right_effect = _era_aggregate(counts, effects, right_idx)
     support = (
@@ -184,6 +161,7 @@ def _era_shift(
             "right_effect": right_effect,
             "support": support,
         }
+
     weight = np.minimum(left_count[support], right_count[support])
     delta = right_effect[support] - left_effect[support]
     shift = float(np.sqrt(np.average(delta**2, weights=weight)))
@@ -217,84 +195,84 @@ def _best_changepoint(counts: np.ndarray, effects: np.ndarray, min_era_count: in
     for change_year in CHANGE_YEARS:
         left = np.where(YEARS < change_year)[0]
         right = np.where(YEARS >= change_year)[0]
-        m = _era_shift(counts, effects, left, right, min_era_count=min_era_count)
-        rows.append((change_year, float(m["changepoint_ratio"]), float(m["shift_rmse"])))
+        metrics = _era_shift(counts, effects, left, right, min_era_count=min_era_count)
+        rows.append((change_year, float(metrics["changepoint_ratio"]), float(metrics["shift_rmse"])))
     valid = [row for row in rows if np.isfinite(row[1])]
     if not valid:
         return np.nan, np.nan
-    best = max(valid, key=lambda x: (x[1], x[2]))
+    best = max(valid, key=lambda row: (row[1], row[2]))
     return int(best[0]), float(best[1])
 
 
 def _recent_direction_consistency(counts: np.ndarray, effects: np.ndarray, min_abs_effect: float = 0.001) -> float:
     e23, e24 = effects[4], effects[5]
     weight = np.minimum(counts[4], counts[5])
-    valid = np.isfinite(e23) & np.isfinite(e24) & (weight > 0)
-    strong = valid & (np.abs(e23) >= min_abs_effect) & (np.abs(e24) >= min_abs_effect)
+    strong = (
+        np.isfinite(e23)
+        & np.isfinite(e24)
+        & (weight > 0)
+        & (np.abs(e23) >= min_abs_effect)
+        & (np.abs(e24) >= min_abs_effect)
+    )
     if not strong.any():
         return float("nan")
     same = np.sign(e23[strong]) == np.sign(e24[strong])
     return float(np.average(same.astype(float), weights=weight[strong]))
 
 
-def _same_player_metrics(full: dict, same: dict) -> tuple[float, float]:
+def _same_player_metrics(full: dict, same: dict):
     full_shift = float(full["shift_rmse"])
     same_shift = float(same["shift_rmse"])
-    preservation = same_shift / full_shift if np.isfinite(full_shift) and full_shift > 0 and np.isfinite(same_shift) else np.nan
-
+    preservation = (
+        same_shift / full_shift
+        if np.isfinite(full_shift) and full_shift > 0 and np.isfinite(same_shift)
+        else np.nan
+    )
     support = np.asarray(full["support"]) & np.asarray(same["support"])
     if support.sum() < 3:
         return preservation, np.nan
     full_delta = np.asarray(full["right_effect"])[support] - np.asarray(full["left_effect"])[support]
     same_delta = np.asarray(same["right_effect"])[support] - np.asarray(same["left_effect"])[support]
     if np.std(full_delta) == 0 or np.std(same_delta) == 0:
-        corr = np.nan
-    else:
-        corr = float(np.corrcoef(full_delta, same_delta)[0, 1])
-    return preservation, corr
+        return preservation, np.nan
+    return preservation, float(np.corrcoef(full_delta, same_delta)[0, 1])
 
 
 def _candidate_verdict(rows: pd.DataFrame) -> dict[str, object]:
     candidate = str(rows["candidate"].iloc[0])
     result: dict[str, object] = {"candidate": candidate}
-    robust_flags = {}
+    flags: dict[str, bool] = {}
     for gt in ["R", "F"]:
-        part = rows.loc[rows["game_type"] == gt]
+        part = rows.loc[rows["game_type"].eq(gt)]
         if part.empty:
-            result[f"{gt}_median_shift"] = np.nan
-            result[f"{gt}_median_ratio"] = np.nan
-            result[f"{gt}_cp2023_share"] = np.nan
-            result[f"{gt}_median_recent_consistency"] = np.nan
-            result[f"{gt}_median_same_corr"] = np.nan
-            robust_flags[gt] = False
+            flags[gt] = False
             continue
         median_shift = float(part["shift_2023_rmse"].median())
         median_ratio = float(part["changepoint_ratio_2023"].median())
-        cp_share = float((part["best_change_year"] == 2023).mean())
-        recent_consistency = float(part["recent_direction_consistency"].median())
+        cp_share = float(part["best_change_year"].eq(2023).mean())
+        recent = float(part["recent_direction_consistency"].median())
         same_corr = float(part["same_player_delta_correlation"].median())
         result[f"{gt}_median_shift"] = median_shift
         result[f"{gt}_median_ratio"] = median_ratio
         result[f"{gt}_cp2023_share"] = cp_share
-        result[f"{gt}_median_recent_consistency"] = recent_consistency
+        result[f"{gt}_median_recent_consistency"] = recent
         result[f"{gt}_median_same_corr"] = same_corr
-        robust_flags[gt] = (
+        flags[gt] = (
             median_shift >= 0.004
             and median_ratio >= 1.2
             and cp_share >= 2.0 / 3.0
-            and recent_consistency >= 0.55
+            and recent >= 0.55
             and (not np.isfinite(same_corr) or same_corr >= 0.45)
         )
 
-    if robust_flags.get("R") and robust_flags.get("F"):
-        verdict = "ROBUST_IN_BOTH_R_F"
-    elif robust_flags.get("R"):
-        verdict = "ROBUST_R_SPECIFIC"
-    elif robust_flags.get("F"):
-        verdict = "ROBUST_F_SPECIFIC"
+    if flags.get("R") and flags.get("F"):
+        result["verdict"] = "ROBUST_IN_BOTH_R_F"
+    elif flags.get("R"):
+        result["verdict"] = "ROBUST_R_SPECIFIC"
+    elif flags.get("F"):
+        result["verdict"] = "ROBUST_F_SPECIFIC"
     else:
-        verdict = "BIN_SENSITIVE_OR_MIXED"
-    result["verdict"] = verdict
+        result["verdict"] = "BIN_SENSITIVE_OR_MIXED"
     return result
 
 
@@ -302,8 +280,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Robustness validation for the strongest non-game_type temporal candidates. "
-            "Runs R-only and F-only analyses separately and repeats each candidate at 4/6/8 global quantile bins. "
-            "Uses CuPy automatically when available; otherwise falls back to a vectorized NumPy bincount backend."
+            "Runs R-only and F-only analyses separately and repeats 4/6/8 target-independent quantile bins. "
+            "CuPy is used automatically when available; otherwise a vectorized NumPy bincount backend is used."
         )
     )
     parser.add_argument("--config", default="configs/default.yaml")
@@ -321,11 +299,13 @@ def main() -> None:
     frame, _ = atlas.recent_core.prepare_frame(config)
     frame[season_col] = pd.to_numeric(frame[season_col], errors="raise").astype(int)
 
-    missing = sorted(
-        {"game_type", "pitcher_id", target_col, season_col}
-        | {column for pair in CANDIDATES.values() for column in pair if column is not None}
-        - set(frame.columns)
-    )
+    required = {"game_type", "pitcher_id", target_col, season_col} | {
+        column
+        for pair in CANDIDATES.values()
+        for column in pair
+        if column is not None
+    }
+    missing = sorted(required - set(frame.columns))
     if missing:
         raise ValueError(f"Missing required columns: {missing}")
 
@@ -337,16 +317,13 @@ def main() -> None:
     )
 
     year_map = {year: idx for idx, year in enumerate(YEARS.tolist())}
-    year_idx_np = frame[season_col].map(year_map).fillna(-1).to_numpy(np.int16)
-    y_np = pd.to_numeric(frame[target_col], errors="raise").to_numpy(np.float64)
+    year_idx = xp.asarray(frame[season_col].map(year_map).fillna(-1).to_numpy(np.int16))
+    y = xp.asarray(pd.to_numeric(frame[target_col], errors="raise").to_numpy(np.float64))
     gt_tokens = frame["game_type"].astype("string").fillna("<MISSING>").astype(str)
-    gt_codes_np, gt_levels_idx = pd.factorize(gt_tokens, sort=True)
-    gt_levels = [str(x) for x in gt_levels_idx.tolist()]
+    gt_codes_np, gt_level_index = pd.factorize(gt_tokens, sort=True)
+    gt_levels = [str(level) for level in gt_level_index.tolist()]
     if "R" not in gt_levels or "F" not in gt_levels:
         raise ValueError(f"Expected game_type levels R/F, got {gt_levels}")
-
-    year_idx = xp.asarray(year_idx_np)
-    y = xp.asarray(y_np)
     gt_codes = xp.asarray(gt_codes_np.astype(np.int16))
     same_mask = xp.asarray(same_mask_pd.to_numpy(bool))
     all_mask = xp.ones(len(frame), dtype=bool)
@@ -365,7 +342,7 @@ def main() -> None:
         except Exception:
             pass
     print("  training            : NONE")
-    print("  robustness checks   : game_type split R/F + global quantile bins 4/6/8")
+    print("  robustness checks   : R-only / F-only + global quantile bins 4/6/8")
     print(f"  game_type levels    : {gt_levels}")
     print(
         f"  same-player cohort  : {same_stats['pitchers']:,} pitchers / {same_stats['rows']:,} rows "
@@ -373,17 +350,16 @@ def main() -> None:
     )
 
     rows: list[dict] = []
-    bin_metadata: dict[str, dict[str, object]] = {}
-
+    metadata: dict[str, dict] = {}
     for candidate, (numeric_col, categorical_col) in CANDIDATES.items():
         numeric_values = xp.asarray(pd.to_numeric(frame[numeric_col], errors="coerce").to_numpy(np.float64))
         if categorical_col is not None:
             cat_codes, cat_levels = _categorical_codes(frame[categorical_col], xp)
         else:
             cat_codes, cat_levels = None, None
-
         print(f"\n[{candidate}]")
-        bin_metadata[candidate] = {}
+        metadata[candidate] = {}
+
         for bins in BIN_SETTINGS:
             numeric_codes, edges, n_numeric_groups = _numeric_codes(numeric_values, bins, xp)
             group_codes, n_groups = _combine_codes(
@@ -393,7 +369,7 @@ def main() -> None:
                 cat_levels,
                 xp,
             )
-            bin_metadata[candidate][str(bins)] = {
+            metadata[candidate][str(bins)] = {
                 "numeric_column": numeric_col,
                 "edges": edges.tolist(),
                 "categorical_column": categorical_col,
@@ -403,13 +379,9 @@ def main() -> None:
 
             for gt in ["ALL", "R", "F"]:
                 if gt == "ALL":
-                    mask = all_mask
-                    response = residual
-                    center = False
+                    mask, response, center = all_mask, residual, False
                 else:
-                    mask = gt_masks[gt]
-                    response = y
-                    center = True
+                    mask, response, center = gt_masks[gt], y, True
 
                 full_counts, full_effects = _profile_from_codes(
                     response=response,
@@ -449,42 +421,48 @@ def main() -> None:
                     min_era_count=args.min_era_count,
                 )
                 same_pres, same_corr = _same_player_metrics(full, same)
-                recent_consistency = _recent_direction_consistency(full_counts, full_effects)
-                rows.append(
-                    {
-                        "candidate": candidate,
-                        "bins": bins,
-                        "game_type": gt,
-                        "supported_groups": int(full["supported_groups"]),
-                        "shift_2023_rmse": float(full["shift_rmse"]),
-                        "changepoint_ratio_2023": float(full["changepoint_ratio"]),
-                        "sign_flip_rate_2023": float(full["sign_flip_rate"]),
-                        "best_change_year": best_year,
-                        "best_changepoint_ratio": best_ratio,
-                        "recent_direction_consistency": recent_consistency,
-                        "same_player_shift_preservation": same_pres,
-                        "same_player_delta_correlation": same_corr,
-                    }
-                )
+                recent = _recent_direction_consistency(full_counts, full_effects)
+                row = {
+                    "candidate": candidate,
+                    "bins": bins,
+                    "game_type": gt,
+                    "supported_groups": int(full["supported_groups"]),
+                    "shift_2023_rmse": float(full["shift_rmse"]),
+                    "changepoint_ratio_2023": float(full["changepoint_ratio"]),
+                    "sign_flip_rate_2023": float(full["sign_flip_rate"]),
+                    "best_change_year": best_year,
+                    "best_changepoint_ratio": best_ratio,
+                    "recent_direction_consistency": recent,
+                    "same_player_shift_preservation": same_pres,
+                    "same_player_delta_correlation": same_corr,
+                }
+                rows.append(row)
                 print(
                     f"  bins={bins} gt={gt:<3} "
-                    f"shift={float(full['shift_rmse']):.5f} "
-                    f"ratio={float(full['changepoint_ratio']):.2f} "
-                    f"flip={float(full['sign_flip_rate']):.2f} "
-                    f"cp={best_year} recent={recent_consistency:.2f} "
-                    f"sameCorr={same_corr:.2f}"
+                    f"shift={row['shift_2023_rmse']:.5f} "
+                    f"ratio={row['changepoint_ratio_2023']:.2f} "
+                    f"flip={row['sign_flip_rate_2023']:.2f} "
+                    f"cp={row['best_change_year']} recent={row['recent_direction_consistency']:.2f} "
+                    f"sameCorr={row['same_player_delta_correlation']:.2f}"
                 )
 
     detail = pd.DataFrame(rows)
-    verdicts = pd.DataFrame([_candidate_verdict(part) for _, part in detail.groupby("candidate")])
-    verdict_rank = {
+    verdicts = pd.DataFrame([
+        _candidate_verdict(part)
+        for _, part in detail.groupby("candidate", sort=False)
+    ])
+    rank = {
         "ROBUST_IN_BOTH_R_F": 0,
         "ROBUST_R_SPECIFIC": 1,
         "ROBUST_F_SPECIFIC": 2,
         "BIN_SENSITIVE_OR_MIXED": 3,
     }
-    verdicts["_rank"] = verdicts["verdict"].map(verdict_rank).fillna(9)
-    verdicts = verdicts.sort_values(["_rank", "R_median_shift", "F_median_shift"], ascending=[True, False, False]).drop(columns="_rank")
+    verdicts["_rank"] = verdicts["verdict"].map(rank).fillna(9)
+    verdicts = verdicts.sort_values(
+        ["_rank", "R_median_shift", "F_median_shift"],
+        ascending=[True, False, False],
+        na_position="last",
+    ).drop(columns="_rank")
 
     out = (ROOT / args.output_dir).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -495,12 +473,12 @@ def main() -> None:
             "backend": backend,
             "bin_settings": BIN_SETTINGS,
             "same_player_cohort": same_stats,
-            "bin_metadata": bin_metadata,
+            "bin_metadata": metadata,
             "notes": [
                 "ALL uses y - E[y | season, game_type], matching the prior controlled analysis.",
-                "R/F rows are analyzed separately and centered within season, so persistence there cannot be caused by R/F mixture changes.",
-                "Quantile edges are global and target-independent; 4/6/8-bin repetition checks binning sensitivity.",
-                "Verdicts are screening labels, not causal claims; model experiments should follow only after robust candidates are identified.",
+                "R/F are analyzed independently and centered within season, so R/F mixture cannot create their shift.",
+                "Global target-independent 4/6/8 quantile bins test sensitivity to arbitrary bin boundaries.",
+                "Verdicts are screening labels, not causal claims.",
             ],
         },
         out / "run_config.json",
