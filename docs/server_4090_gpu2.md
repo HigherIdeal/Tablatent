@@ -17,20 +17,33 @@ git switch agent/stable-player-dynamics-gru
 git pull --ff-only
 ```
 
-## 2. Bootstrap the Python environment
+## 2. Bootstrap the Conda environment
+
+The standard environment name is `tablatent`.
 
 ```bash
 bash scripts/bootstrap_4090_gpu2.sh
 ```
 
-The bootstrap creates `.venv`, installs PyTorch 2.7.1 from the official CUDA 12.8 wheel index, installs the project requirements, isolates physical GPU 2, and runs both PyTorch and CatBoost GPU smoke tests.
+The bootstrap requires `conda` to already be installed. It creates/reuses:
 
-A system CUDA toolkit is not required for these Python wheels; a working NVIDIA driver is required.
+```text
+conda env: tablatent
+Python:    3.11
+```
+
+Then it installs the pinned PyTorch GPU wheel and the repository requirements, isolates physical GPU 2, and runs PyTorch and CatBoost GPU smoke tests.
+
+To use another Conda environment name deliberately:
+
+```bash
+CONDA_ENV_NAME=my_env bash scripts/bootstrap_4090_gpu2.sh
+```
 
 ## 3. Activate for every shell
 
 ```bash
-source .venv/bin/activate
+conda activate tablatent
 source scripts/activate_gpu2.sh
 ```
 
@@ -51,7 +64,7 @@ CatBoost: --devices 0
 
 Do **not** pass `--devices 2` after sourcing `activate_gpu2.sh`; logical device 2 no longer exists inside the isolated process.
 
-This isolation is deliberate because several legacy scripts default to `cuda:0` / `--devices 0`. They will now safely hit physical GPU 2 rather than physical GPU 0.
+This isolation protects legacy scripts whose defaults are `cuda:0` / `--devices 0`: they hit physical GPU 2 rather than physical GPU 0.
 
 ## 4. Verify the server at any time
 
@@ -61,6 +74,7 @@ python scripts/check_gpu2_environment.py --smoke-catboost
 
 Expected properties:
 
+- active Conda environment is `tablatent`
 - `CUDA_VISIBLE_DEVICES='2'`
 - `torch.cuda.device_count=1`
 - logical `cuda:0` reports an RTX 4090
@@ -83,18 +97,18 @@ The repository already contains the fixed Google Drive source URL and validates 
 
 ## Performance policy
 
-The primary experiments are currently CatBoost-based. Do not change model semantics merely to consume more VRAM. CatBoost GPU training already keeps categorical features in GPU RAM by default and its default GPU-RAM fraction is 0.95. More VRAM therefore gives headroom automatically; changing `border_count`, tree depth, or the temporal split only for speed would change the experiment itself.
+The primary experiments are CatBoost-based. Do not change model semantics merely to consume more VRAM; changing tree depth, border count, feature policy, or the temporal split changes the experiment.
 
 For speed without changing the model:
 
-- keep physical GPU 2 isolated so no other project process can spill to another GPU;
-- reuse cached predictions/artifacts when a script supports them;
-- use the GPU implementation for all CatBoost fits;
+- keep physical GPU 2 isolated;
+- keep processed data on local SSD/NVMe;
+- reuse cached predictions/artifacts where supported;
+- use GPU CatBoost for every fit;
 - avoid verbose per-tree logging unless diagnosing a run;
-- keep processed data on local SSD/NVMe rather than a network-mounted directory;
-- run only one large CatBoost training job on GPU 2 at a time.
+- run one large CatBoost training job on GPU 2 at a time.
 
-For future PyTorch experiments, tune batch size upward on this server only after a short memory probe. Do not globally change the historical experiment config solely because the server has more VRAM; that would make old comparisons non-equivalent.
+For future PyTorch experiments, increase batch size only after a short memory probe on the 4090. Historical configs should remain unchanged when reproducing prior results.
 
 ## Current reference architecture
 
