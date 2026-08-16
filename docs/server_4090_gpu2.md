@@ -90,8 +90,10 @@ watch -n 1 nvidia-smi -i 2
 ## 5. Prepare data once
 
 ```bash
-python scripts/prepare_data.py --config configs/default.yaml
+python scripts/prepare_data.py
 ```
+
+`prepare_data.py` does not accept `--config`; it uses built-in defaults for `control_success` and `season`. Optional arguments are `--root`, `--target`, `--season-col`, and `--force`.
 
 The repository already contains the fixed Google Drive source URL and validates the 2019–2024 seasons before writing `data/processed/train.pkl`.
 
