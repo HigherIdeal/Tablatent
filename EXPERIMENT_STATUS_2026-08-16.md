@@ -70,4 +70,4 @@ Stop spending the main search budget on generic regime adaptation. Preserve the 
 
 ## Server profile
 
-The current compute server has four RTX 4090 GPUs. Project runs must use **physical GPU 2 only**. On the server, source `scripts/activate_gpu2.sh`; this sets `CUDA_VISIBLE_DEVICES=2`, so physical GPU 2 becomes process-local `cuda:0` / CatBoost `devices=0` and the other three GPUs are inaccessible to the process.
+The current compute server has four RTX 4090 GPUs. Project runs must use **physical GPU 2 only**. The standard environment is the Conda environment `tablatent` (Python 3.11). After `conda activate tablatent`, source `scripts/activate_gpu2.sh`; this sets `CUDA_VISIBLE_DEVICES=2`, so physical GPU 2 becomes process-local `cuda:0` / CatBoost `devices=0` and the other three GPUs are inaccessible to the process.
