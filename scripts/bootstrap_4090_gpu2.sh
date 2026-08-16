@@ -31,7 +31,11 @@ printf '\n[1/5] NVIDIA inventory\n'
 nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv,noheader
 
 printf '\n[2/5] Creating virtual environment: %s\n' "${VENV_DIR}"
-"${PYTHON_BIN}" -m venv "${VENV_DIR}"
+if ! "${PYTHON_BIN}" -m venv "${VENV_DIR}"; then
+  echo "ERROR: Python venv support is missing." >&2
+  echo "On Ubuntu/Debian install it first, e.g. sudo apt install python3-venv" >&2
+  exit 1
+fi
 # shellcheck disable=SC1090
 source "${VENV_DIR}/bin/activate"
 python -m pip install --upgrade pip setuptools wheel
