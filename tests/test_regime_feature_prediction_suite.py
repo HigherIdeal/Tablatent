@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -10,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "run_regime_feature_prediction_suite.py"
 spec = importlib.util.spec_from_file_location("regime_feature_suite", SCRIPT)
 mod = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = mod
 assert spec.loader is not None
 spec.loader.exec_module(mod)
 
@@ -42,12 +44,10 @@ def test_regime_continuous_masks_separate_old_recent_r_and_hand() -> None:
     assert train[mod.RECENT_FLAG].tolist() == [0.0, 0.0, 1.0, 1.0]
     assert valid[mod.RECENT_FLAG].tolist() == [1.0, 1.0, 1.0, 1.0]
 
-    # old R, hand=1 appears only in the first training row
     assert np.isclose(train.loc[0, "ro_fastball_hand1"], 0.40)
     assert train["rr_fastball_hand1"].notna().sum() == 1
     assert train["rr_fastball_hand2"].notna().sum() == 1
 
-    # F rows must not leak into R-specific masks
     f_row = valid.index[valid["game_type"].eq("F")][0]
     assert pd.isna(valid.loc[f_row, "rr_fastball_hand1"])
     assert pd.isna(valid.loc[f_row, "rr_fastball_hand2"])
@@ -76,10 +76,10 @@ def test_conditional_bias_rmse_detects_group_bias_not_global_bias() -> None:
 
 def test_summary_uses_fixed_fold_weights() -> None:
     rows = []
-    for fold, weight, recent_brier, full_brier in [
-        ("a", 0.5, 0.20, 0.22),
-        ("b", 0.2, 0.30, 0.31),
-        ("c", 0.3, 0.40, 0.41),
+    for fold, recent_brier, full_brier in [
+        ("a", 0.20, 0.22),
+        ("b", 0.30, 0.31),
+        ("c", 0.40, 0.41),
     ]:
         for variant, policy, brier in [
             ("recent_base", "recent", recent_brier),
