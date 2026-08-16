@@ -11,9 +11,14 @@ set -euo pipefail
 # - PyTorch 2.7.1 CUDA 12.8 wheel installed with pip inside the conda env
 # - CatBoost 1.2.10 from configs/requirements.txt
 # - physical GPU 2 only via scripts/activate_gpu2.sh
+#
+# This server may expose a shared, read-only Anaconda base. Force Conda package
+# cache and environment writes into the current user's ~/.conda directory so
+# `conda create` never tries to mutate the shared base installation.
 
 CONDA_ENV_NAME="${CONDA_ENV_NAME:-tablatent}"
 PYTHON_VERSION="${PYTHON_VERSION:-3.11}"
+USER_CONDA_ROOT="${USER_CONDA_ROOT:-$HOME/.conda}"
 
 if ! command -v conda >/dev/null 2>&1; then
   echo "ERROR: conda is not available in PATH. Install Miniconda/Anaconda first." >&2
@@ -28,10 +33,17 @@ fi
 printf '\n[1/6] NVIDIA inventory\n'
 nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv,noheader
 
-printf '\n[2/6] Initializing conda shell\n'
+printf '\n[2/6] Initializing conda shell with user-writable cache/env paths\n'
 CONDA_BASE="$(conda info --base)"
 # shellcheck disable=SC1091
 source "${CONDA_BASE}/etc/profile.d/conda.sh"
+
+export CONDA_PKGS_DIRS="${USER_CONDA_ROOT}/pkgs"
+export CONDA_ENVS_PATH="${USER_CONDA_ROOT}/envs"
+mkdir -p "${CONDA_PKGS_DIRS}" "${CONDA_ENVS_PATH}"
+printf '  shared base : %s\n' "${CONDA_BASE}"
+printf '  pkgs cache  : %s\n' "${CONDA_PKGS_DIRS}"
+printf '  envs dir    : %s\n' "${CONDA_ENVS_PATH}"
 
 printf '\n[3/6] Creating/reusing conda env: %s (Python %s)\n' "${CONDA_ENV_NAME}" "${PYTHON_VERSION}"
 if conda env list | awk '{print $1}' | grep -Fxq "${CONDA_ENV_NAME}"; then
