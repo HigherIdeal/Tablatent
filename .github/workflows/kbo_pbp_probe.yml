@@ -25,76 +25,118 @@ jobs:
           OUT = pathlib.Path('outputs/kbo_pbp_probe')
           OUT.mkdir(parents=True, exist_ok=True)
           UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36'
-          dates = {
-              2019: '2019-03-23',
-              2020: '2020-05-05',
-              2021: '2021-04-03',
-              2022: '2022-04-02',
-              2023: '2023-04-01',
-              2024: '2024-03-23',
-          }
 
           def get_json(url):
               req = urllib.request.Request(url, headers={'User-Agent': UA, 'Accept': 'application/json'})
               with urllib.request.urlopen(req, timeout=30) as r:
-                  body = r.read()
-                  return r.status, json.loads(body.decode('utf-8'))
+                  return r.status, json.loads(r.read().decode('utf-8'))
 
+          def schedule(date):
+              q = urllib.parse.urlencode({'upperCategoryId':'kbaseball','fromDate':date,'toDate':date})
+              return get_json(f'https://api-gw.sports.naver.com/schedule/games?{q}')
+
+          def relay(game_id, inning=None):
+              url = f'https://api-gw.sports.naver.com/schedule/games/{game_id}/relay'
+              if inning is not None:
+                  url += f'?inning={inning}'
+              return get_json(url)
+
+          dates = {
+              2019: '2019-03-23', 2020: '2020-05-05', 2021: '2021-04-03',
+              2022: '2022-04-02', 2023: '2023-04-01', 2024: '2024-03-23',
+          }
           summary = []
           for year, date in dates.items():
-              q = urllib.parse.urlencode({
-                  'upperCategoryId': 'kbaseball',
-                  'fromDate': date,
-                  'toDate': date,
-              })
-              schedule_url = f'https://api-gw.sports.naver.com/schedule/games?{q}'
-              row = {'year': year, 'date': date, 'schedule_url': schedule_url}
+              row = {'year':year,'date':date}
               try:
-                  status, sched = get_json(schedule_url)
-                  row['schedule_http'] = status
-                  (OUT / f'{year}_schedule.json').write_text(json.dumps(sched, ensure_ascii=False, indent=2), encoding='utf-8')
-                  games = ((sched.get('result') or {}).get('games') or []) if isinstance(sched, dict) else []
-                  kbo_games = [g for g in games if g.get('categoryId') == 'kbo'] or games
-                  row['n_games'] = len(kbo_games)
-                  if not kbo_games:
-                      row['relay_ok'] = False
-                      row['error'] = 'no games returned'
-                      summary.append(row)
-                      continue
-                  game = kbo_games[0]
-                  game_id = game.get('gameId') or game.get('gamePk') or game.get('id')
-                  row['game_id'] = game_id
-                  row['home'] = game.get('homeTeamName')
-                  row['away'] = game.get('awayTeamName')
-                  if not game_id:
-                      row['relay_ok'] = False
-                      row['error'] = f'game id not found; keys={sorted(game.keys())}'
-                      summary.append(row)
-                      continue
-                  relay_url = f'https://api-gw.sports.naver.com/schedule/games/{game_id}/relay'
-                  row['relay_url'] = relay_url
-                  rstatus, relay = get_json(relay_url)
-                  row['relay_http'] = rstatus
-                  (OUT / f'{year}_{game_id}_relay.json').write_text(json.dumps(relay, ensure_ascii=False, indent=2), encoding='utf-8')
-                  trd = ((relay.get('result') or {}).get('textRelayData')) if isinstance(relay, dict) else None
-                  row['relay_ok'] = trd is not None
-                  if isinstance(trd, dict):
-                      trs = trd.get('textRelays') or []
-                      row['n_text_relays'] = len(trs)
-                      row['relay_keys'] = sorted(trd.keys())
-                      if trs:
-                          row['first_text_relay_keys'] = sorted(trs[0].keys())
-                          opts = trs[0].get('textOptions') or []
-                          row['first_text_options'] = opts[:5]
-                  summary.append(row)
+                  st, data = schedule(date)
+                  games = ((data.get('result') or {}).get('games') or [])
+                  games = [g for g in games if g.get('categoryId') == 'kbo'] or games
+                  row.update(schedule_http=st,n_games=len(games))
+                  if games:
+                      g = games[0]
+                      gid = g.get('gameId')
+                      row.update(game_id=gid,home=g.get('homeTeamName'),away=g.get('awayTeamName'))
+                      rs, rd = relay(gid)
+                      trd = ((rd.get('result') or {}).get('textRelayData'))
+                      row.update(relay_http=rs,relay_ok=trd is not None)
+                      if isinstance(trd,dict): row['n_text_relays']=len(trd.get('textRelays') or [])
+                      (OUT/f'{year}_{gid}_relay.json').write_text(json.dumps(rd,ensure_ascii=False,indent=2),encoding='utf-8')
+                  (OUT/f'{year}_schedule.json').write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding='utf-8')
               except Exception as e:
-                  row['relay_ok'] = False
-                  row['error'] = repr(e)
-                  summary.append(row)
-              time.sleep(0.4)
+                  row['error']=repr(e)
+              summary.append(row)
+              time.sleep(.25)
 
-          (OUT / 'summary.json').write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding='utf-8')
-          print(json.dumps(summary, ensure_ascii=False, indent=2))
+          # 2021: opening-day first game had null textRelayData. Scan several dates/games until a historical relay is found.
+          probe_2021=[]
+          found_2021=None
+          for date in ['2021-04-04','2021-04-06','2021-04-07','2021-04-08','2021-04-09']:
+              try:
+                  st,data=schedule(date)
+                  games=((data.get('result') or {}).get('games') or [])
+                  games=[g for g in games if g.get('categoryId')=='kbo'] or games
+                  for g in games:
+                      gid=g.get('gameId')
+                      rs,rd=relay(gid)
+                      trd=((rd.get('result') or {}).get('textRelayData'))
+                      p={'date':date,'game_id':gid,'home':g.get('homeTeamName'),'away':g.get('awayTeamName'),'http':rs,'ok':trd is not None}
+                      if isinstance(trd,dict): p['n_text_relays']=len(trd.get('textRelays') or [])
+                      probe_2021.append(p)
+                      if trd is not None:
+                          found_2021=(gid,rd)
+                          break
+                      time.sleep(.15)
+                  if found_2021: break
+              except Exception as e:
+                  probe_2021.append({'date':date,'error':repr(e)})
+          (OUT/'probe_2021.json').write_text(json.dumps(probe_2021,ensure_ascii=False,indent=2),encoding='utf-8')
+          if found_2021:
+              (OUT/f'2021_{found_2021[0]}_working_relay.json').write_text(json.dumps(found_2021[1],ensure_ascii=False,indent=2),encoding='utf-8')
+
+          # 2019: verify full-game inning-by-inning historical PBP, not merely final/latest relay chunk.
+          gid='20190323HHOB02019'
+          innings=[]
+          pitch_samples=[]
+          player_samples=[]
+          for inn in range(1,13):
+              try:
+                  rs,rd=relay(gid,inn)
+                  trd=((rd.get('result') or {}).get('textRelayData'))
+                  if not isinstance(trd,dict):
+                      innings.append({'inning':inn,'http':rs,'ok':False})
+                      continue
+                  trs=trd.get('textRelays') or []
+                  n_opts=n_pitch=n_pts=0
+                  for tr in trs:
+                      opts=tr.get('textOptions') or []
+                      pts=tr.get('ptsOptions') or []
+                      n_opts += len(opts); n_pts += len(pts)
+                      for o in opts:
+                          if o.get('type')==1:
+                              n_pitch += 1
+                              if len(pitch_samples)<20:
+                                  pitch_samples.append({
+                                      'inning':inn,'text':o.get('text'),'pitchNum':o.get('pitchNum'),
+                                      'pitchResult':o.get('pitchResult'),'stuff':o.get('stuff'),'speed':o.get('speed'),
+                                      'state':o.get('currentGameState')
+                                  })
+                  innings.append({'inning':inn,'http':rs,'ok':True,'n_text_relays':len(trs),'n_text_options':n_opts,'n_pitch_type1':n_pitch,'n_pts':n_pts})
+                  for side in ('awayLineup','homeLineup'):
+                      lu=trd.get(side) or {}
+                      for typ in ('pitcher','batter'):
+                          for p in (lu.get(typ) or [])[:5]:
+                              x={'side':side,'type':typ,'name':p.get('name'),'pcode':p.get('pcode') or p.get('pCode'),'batOrder':p.get('batOrder'),'hitType':p.get('hitType')}
+                              if x not in player_samples: player_samples.append(x)
+                  (OUT/f'2019_{gid}_inning_{inn:02d}.json').write_text(json.dumps(rd,ensure_ascii=False,indent=2),encoding='utf-8')
+              except Exception as e:
+                  innings.append({'inning':inn,'error':repr(e)})
+              time.sleep(.15)
+
+          deep={'summary':summary,'probe_2021':probe_2021,'working_2021_game':found_2021[0] if found_2021 else None,
+                '2019_game_id':gid,'2019_innings':innings,'2019_pitch_samples':pitch_samples,'2019_player_samples':player_samples}
+          (OUT/'deep_summary.json').write_text(json.dumps(deep,ensure_ascii=False,indent=2),encoding='utf-8')
+          print(json.dumps(deep,ensure_ascii=False,indent=2))
           PY
       - uses: actions/upload-artifact@v4
         with:
