@@ -71,8 +71,10 @@ Fixed source URL:
 Prepare once:
 
 ```bash
-python scripts/prepare_data.py --config configs/default.yaml
+python scripts/prepare_data.py
 ```
+
+`prepare_data.py` uses its built-in defaults (`control_success`, `season`) and does not take `--config`. Optional arguments are `--root`, `--target`, `--season-col`, and `--force`.
 
 The loader validates 2019–2024 seasons and stores the processed frame at:
 
