@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
-import math
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 import pandas as pd
@@ -62,6 +61,22 @@ CATEGORICAL_HINTS = {
     "batter_team_id",
 }
 
+INTERACTION_REQUIREMENTS = {
+    "ix_count": ["balls_before", "strikes_before"],
+    "ix_game_type_x_count": ["game_type", "balls_before", "strikes_before"],
+    "ix_base_x_count": ["base_state", "balls_before", "strikes_before"],
+    "ix_hand_matchup": ["pitcher_hand", "batter_hand"],
+    "ix_game_type_x_hand": ["game_type", "pitcher_hand", "batter_hand"],
+    "ix_game_type_x_pitcher_exp": ["game_type", "asof_pitcher_n"],
+    "ix_control_x_pitcher_exp": ["asof_pitcher_ball_rate", "asof_pitcher_strike_rate", "asof_pitcher_n"],
+    "ix_batter_success_x_exp": ["asof_batter_success_rate", "asof_batter_n"],
+    "ix_recent_form_x_pitcher_exp": ["asof_pitcher_success_rate", "asof_pitcher_prev3_game_success_rate", "asof_pitcher_n"],
+    "ix_dominant_pitchmix": ["asof_pitcher_fastball_rate", "asof_pitcher_breaking_rate", "asof_pitcher_offspeed_rate"],
+    "ix_pitchmix_x_batter_hand": ["asof_pitcher_fastball_rate", "asof_pitcher_breaking_rate", "asof_pitcher_offspeed_rate", "batter_hand"],
+    "ix_game_type_x_pitchmix": ["asof_pitcher_fastball_rate", "asof_pitcher_breaking_rate", "asof_pitcher_offspeed_rate", "game_type"],
+    "ix_inning_x_li": ["inning", "li"],
+}
+
 
 def _safe_token(series: pd.Series) -> pd.Series:
     return series.astype("string").fillna("<MISSING>").astype(str)
@@ -75,8 +90,6 @@ def _find_data_path(explicit: str | None) -> Path:
         if not path.is_file():
             raise FileNotFoundError(f"data file not found: {path}")
         return path
-
-    # CSV is preferred on a phone because usecols avoids loading every column.
     candidates = [
         ROOT / "data" / "raw" / "extracted" / "train.csv",
         ROOT / "data" / "raw" / "train.csv",
@@ -86,19 +99,15 @@ def _find_data_path(explicit: str | None) -> Path:
         if path.is_file():
             return path
     raise FileNotFoundError(
-        "No train data found. Expected one of data/raw/extracted/train.csv, "
-        "data/raw/train.csv, data/processed/train.pkl. Pass --data PATH if it is elsewhere."
+        "No train data found. Expected data/raw/extracted/train.csv, data/raw/train.csv, "
+        "or data/processed/train.pkl. Pass --data PATH if it is elsewhere."
     )
 
 
 def _needed_columns() -> list[str]:
-    columns = {
-        "season",
-        "control_success",
-        "pitcher_id",
-        "batter_id",
-        *SCALAR_SIGNALS,
-    }
+    columns = {"season", "control_success", "pitcher_id", "batter_id", *SCALAR_SIGNALS}
+    for required in INTERACTION_REQUIREMENTS.values():
+        columns.update(required)
     return sorted(columns)
 
 
@@ -110,27 +119,23 @@ def _load_analysis_frame(path: Path, max_rows: int | None) -> pd.DataFrame:
         usecols = [c for c in wanted if c in header]
         frame = pd.read_csv(path, usecols=usecols, nrows=max_rows, low_memory=False)
     elif suffix in {".pkl", ".pickle"}:
-        print("  note: pickle input loads the full frame before selecting columns; CSV is lower-RAM on Termux")
+        print("  note: pickle loads the full frame before selecting columns; CSV uses less RAM on Termux")
         frame = pd.read_pickle(path)
-        keep = [c for c in wanted if c in frame.columns]
-        frame = frame.loc[:, keep]
+        frame = frame.loc[:, [c for c in wanted if c in frame.columns]]
         if max_rows is not None:
             frame = frame.iloc[:max_rows].copy()
     else:
         raise ValueError(f"unsupported data format: {path.suffix}")
 
-    required = {"season", "control_success"}
-    missing = sorted(required - set(frame.columns))
+    missing = sorted({"season", "control_success"} - set(frame.columns))
     if missing:
         raise ValueError(f"required columns missing: {missing}")
-
     frame["season"] = pd.to_numeric(frame["season"], errors="coerce")
     frame["control_success"] = pd.to_numeric(frame["control_success"], errors="coerce")
     frame = frame.dropna(subset=["season", "control_success"]).copy()
     frame["season"] = frame["season"].astype(np.int16)
     frame["control_success"] = frame["control_success"].astype(np.float32)
-    frame = frame[frame["season"].isin(ALL_YEARS)].reset_index(drop=True)
-    return frame
+    return frame[frame["season"].isin(ALL_YEARS)].reset_index(drop=True)
 
 
 def _quantile_groups(series: pd.Series, bins: int) -> tuple[pd.Series, str, int]:
@@ -167,79 +172,69 @@ def _bin_token(series: pd.Series, bins: int) -> pd.Series:
     return groups.astype(str)
 
 
-def _interaction_signals(frame: pd.DataFrame, bins: int) -> dict[str, pd.Series]:
-    out: dict[str, pd.Series] = {}
+def _dominant_pitchmix(frame: pd.DataFrame) -> pd.Series:
+    cols = ["asof_pitcher_fastball_rate", "asof_pitcher_breaking_rate", "asof_pitcher_offspeed_rate"]
+    arr = frame[cols].apply(pd.to_numeric, errors="coerce").to_numpy(np.float64)
+    valid = np.isfinite(arr).any(axis=1)
+    safe = np.where(np.isfinite(arr), arr, -np.inf)
+    names = np.asarray(["fastball", "breaking", "offspeed"], dtype=object)
+    labels = np.full(len(frame), "<MISSING>", dtype=object)
+    labels[valid] = names[np.argmax(safe[valid], axis=1)]
+    return pd.Series(labels, index=frame.index, dtype="string")
 
-    def has(*cols: str) -> bool:
-        return all(c in frame.columns for c in cols)
 
-    if has("balls_before", "strikes_before"):
+def _available_interactions(frame: pd.DataFrame) -> list[str]:
+    columns = set(frame.columns)
+    return [name for name, required in INTERACTION_REQUIREMENTS.items() if set(required).issubset(columns)]
+
+
+def _build_interaction(frame: pd.DataFrame, name: str, bins: int) -> pd.Series:
+    count = None
+    if name in {"ix_count", "ix_game_type_x_count", "ix_base_x_count"}:
         count = _safe_token(frame["balls_before"]) + "|" + _safe_token(frame["strikes_before"])
-        out["ix_count"] = count
-        if "game_type" in frame.columns:
-            out["ix_game_type_x_count"] = _safe_token(frame["game_type"]) + "|" + count
-        if "base_state" in frame.columns:
-            out["ix_base_x_count"] = _safe_token(frame["base_state"]) + "|" + count
-
-    if has("pitcher_hand", "batter_hand"):
+    if name == "ix_count":
+        return count.astype("string")
+    if name == "ix_game_type_x_count":
+        return (_safe_token(frame["game_type"]) + "|" + count).astype("string")
+    if name == "ix_base_x_count":
+        return (_safe_token(frame["base_state"]) + "|" + count).astype("string")
+    if name == "ix_hand_matchup":
+        return (_safe_token(frame["pitcher_hand"]) + "|" + _safe_token(frame["batter_hand"])).astype("string")
+    if name == "ix_game_type_x_hand":
         hand = _safe_token(frame["pitcher_hand"]) + "|" + _safe_token(frame["batter_hand"])
-        out["ix_hand_matchup"] = hand
-        if "game_type" in frame.columns:
-            out["ix_game_type_x_hand"] = _safe_token(frame["game_type"]) + "|" + hand
-
-    if has("game_type", "asof_pitcher_n"):
-        out["ix_game_type_x_pitcher_exp"] = (
-            _safe_token(frame["game_type"]) + "|" + _bin_token(frame["asof_pitcher_n"], bins)
-        )
-
-    if has("asof_pitcher_ball_rate", "asof_pitcher_strike_rate", "asof_pitcher_n"):
-        out["ix_control_x_pitcher_exp"] = (
-            _bin_token(frame["asof_pitcher_ball_rate"], max(4, bins // 2))
+        return (_safe_token(frame["game_type"]) + "|" + hand).astype("string")
+    if name == "ix_game_type_x_pitcher_exp":
+        return (_safe_token(frame["game_type"]) + "|" + _bin_token(frame["asof_pitcher_n"], bins)).astype("string")
+    if name == "ix_control_x_pitcher_exp":
+        small_bins = max(4, bins // 2)
+        return (
+            _bin_token(frame["asof_pitcher_ball_rate"], small_bins)
             + "|"
-            + _bin_token(frame["asof_pitcher_strike_rate"], max(4, bins // 2))
+            + _bin_token(frame["asof_pitcher_strike_rate"], small_bins)
             + "|"
-            + _bin_token(frame["asof_pitcher_n"], max(4, bins // 2))
-        )
-
-    if has("asof_batter_success_rate", "asof_batter_n"):
-        out["ix_batter_success_x_exp"] = (
+            + _bin_token(frame["asof_pitcher_n"], small_bins)
+        ).astype("string")
+    if name == "ix_batter_success_x_exp":
+        return (
             _bin_token(frame["asof_batter_success_rate"], bins)
             + "|"
             + _bin_token(frame["asof_batter_n"], bins)
-        )
-
-    if has("asof_pitcher_success_rate", "asof_pitcher_prev3_game_success_rate", "asof_pitcher_n"):
+        ).astype("string")
+    if name == "ix_recent_form_x_pitcher_exp":
         delta = pd.to_numeric(frame["asof_pitcher_prev3_game_success_rate"], errors="coerce") - pd.to_numeric(
             frame["asof_pitcher_success_rate"], errors="coerce"
         )
-        out["ix_recent_form_x_pitcher_exp"] = _bin_token(delta, bins) + "|" + _bin_token(
-            frame["asof_pitcher_n"], bins
-        )
-
-    mix_cols = [
-        "asof_pitcher_fastball_rate",
-        "asof_pitcher_breaking_rate",
-        "asof_pitcher_offspeed_rate",
-    ]
-    if has(*mix_cols):
-        mix = frame[mix_cols].apply(pd.to_numeric, errors="coerce")
-        arr = mix.to_numpy(np.float64)
-        valid = np.isfinite(arr).any(axis=1)
-        labels = np.array(["<MISSING>"] * len(frame), dtype=object)
-        safe = np.where(np.isfinite(arr), arr, -np.inf)
-        names = np.asarray(["fastball", "breaking", "offspeed"], dtype=object)
-        labels[valid] = names[np.argmax(safe[valid], axis=1)]
-        dominant = pd.Series(labels, index=frame.index, dtype="string")
-        out["ix_dominant_pitchmix"] = dominant
-        if "batter_hand" in frame.columns:
-            out["ix_pitchmix_x_batter_hand"] = dominant.astype(str) + "|" + _safe_token(frame["batter_hand"])
-        if "game_type" in frame.columns:
-            out["ix_game_type_x_pitchmix"] = _safe_token(frame["game_type"]) + "|" + dominant.astype(str)
-
-    if has("inning", "li"):
-        out["ix_inning_x_li"] = _safe_token(frame["inning"]) + "|" + _bin_token(frame["li"], bins)
-
-    return out
+        return (_bin_token(delta, bins) + "|" + _bin_token(frame["asof_pitcher_n"], bins)).astype("string")
+    if name in {"ix_dominant_pitchmix", "ix_pitchmix_x_batter_hand", "ix_game_type_x_pitchmix"}:
+        dominant = _dominant_pitchmix(frame)
+        if name == "ix_dominant_pitchmix":
+            return dominant
+        if name == "ix_pitchmix_x_batter_hand":
+            return (dominant.astype(str) + "|" + _safe_token(frame["batter_hand"])).astype("string")
+        return (_safe_token(frame["game_type"]) + "|" + dominant.astype(str)).astype("string")
+    if name == "ix_inning_x_li":
+        return (_safe_token(frame["inning"]) + "|" + _bin_token(frame["li"], bins)).astype("string")
+    raise ValueError(f"unknown interaction: {name}")
 
 
 def _profile(groups: pd.Series, target: pd.Series, season: pd.Series, year: int) -> pd.DataFrame:
@@ -344,8 +339,10 @@ def _audit_one(
     season = frame["season"]
     target = frame["control_success"]
     profiles = {year: _profile(groups, target, season, year) for year in ALL_YEARS}
-    old = _era_profile(profiles, OLD_YEARS).rename(columns={"count": "old_n", "effect": "old_e"})
-    recent = _era_profile(profiles, RECENT_YEARS).rename(columns={"count": "recent_n", "effect": "recent_e"})
+    old_raw = _era_profile(profiles, OLD_YEARS)
+    recent_raw = _era_profile(profiles, RECENT_YEARS)
+    old = old_raw.rename(columns={"count": "old_n", "effect": "old_e"})
+    recent = recent_raw.rename(columns={"count": "recent_n", "effect": "recent_e"})
     joined = old.join(recent, how="inner")
     supported = joined[(joined["old_n"] >= min_era_count) & (joined["recent_n"] >= min_era_count)].copy()
 
@@ -377,7 +374,7 @@ def _audit_one(
         0.002,
     )
     changepoint_ratio = float(shock_22_23 / background) if np.isfinite(shock_22_23) else float("nan")
-    composition_js = _js_divergence(old.reset_index(), recent.reset_index())
+    composition_js = _js_divergence(old_raw.reset_index(), recent_raw.reset_index())
 
     cohort_shift = float("nan")
     cohort_ratio = float("nan")
@@ -389,7 +386,8 @@ def _audit_one(
         sub_old = _era_profile(sub_profiles, OLD_YEARS).rename(columns={"count": "old_n", "effect": "old_e"})
         sub_recent = _era_profile(sub_profiles, RECENT_YEARS).rename(columns={"count": "recent_n", "effect": "recent_e"})
         sj = sub_old.join(sub_recent, how="inner")
-        sj = sj[(sj["old_n"] >= max(100, min_era_count // 4)) & (sj["recent_n"] >= max(100, min_era_count // 4))]
+        cohort_min = max(100, min_era_count // 4)
+        sj = sj[(sj["old_n"] >= cohort_min) & (sj["recent_n"] >= cohort_min)]
         cohort_groups_supported = int(len(sj))
         if not sj.empty:
             w = np.minimum(sj["old_n"].to_numpy(float), sj["recent_n"].to_numpy(float))
@@ -432,10 +430,7 @@ def _audit_one(
     else:
         classification = "weak"
 
-    long = pd.concat(
-        [profiles[y].assign(signal=name) for y in ALL_YEARS],
-        ignore_index=True,
-    )
+    long = pd.concat([profiles[y].assign(signal=name) for y in ALL_YEARS], ignore_index=True)
     summary = {
         "signal": name,
         "groups": int(groups.nunique(dropna=False)),
@@ -461,8 +456,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "CPU-only regime atlas for Termux/phone use. No CatBoost is trained. "
-            "It scans scalar features and selected interactions for 2023 changepoints, "
-            "composition shift, post-2023 persistence, and same-pitcher cohort persistence."
+            "Scans scalar features and selected interactions for 2023 changepoints, "
+            "composition shift, post-2023 persistence, and same-pitcher persistence."
         )
     )
     parser.add_argument("--data", default=None, help="train.csv or train.pkl; auto-detected if omitted")
@@ -472,7 +467,7 @@ def main() -> None:
     parser.add_argument("--min-year-count", type=int, default=None)
     parser.add_argument("--same-pitcher-min-old", type=int, default=200)
     parser.add_argument("--same-pitcher-min-recent", type=int, default=100)
-    parser.add_argument("--max-rows", type=int, default=None, help="debug/smoke only; leave unset for real analysis")
+    parser.add_argument("--max-rows", type=int, default=None, help="debug only; leave unset for real analysis")
     parser.add_argument("--output-dir", default="outputs/phone_regime_atlas")
     args = parser.parse_args()
 
@@ -512,10 +507,7 @@ def main() -> None:
     print(season_rates.to_string(index=False))
 
     cohort_mask, cohort_summary = _same_entity_mask(
-        frame,
-        "pitcher_id",
-        args.same_pitcher_min_old,
-        args.same_pitcher_min_recent,
+        frame, "pitcher_id", args.same_pitcher_min_old, args.same_pitcher_min_recent
     )
     if cohort_summary.get("available"):
         print(
@@ -527,40 +519,46 @@ def main() -> None:
         print("\n[Same-pitcher cohort] pitcher_id unavailable; cohort control skipped")
         cohort_mask = None
 
-    signals: list[tuple[str, pd.Series, str]] = []
-    for feature in SCALAR_SIGNALS:
-        if feature not in frame.columns:
-            continue
-        groups, grouping, _ = _make_groups(frame[feature], feature in CATEGORICAL_HINTS, bins)
-        signals.append((feature, groups, grouping))
+    scalar_names = [name for name in SCALAR_SIGNALS if name in frame.columns]
+    interaction_names = _available_interactions(frame)
+    total = len(scalar_names) + len(interaction_names)
+    print(f"\n[Atlas] signals={total} (scalar={len(scalar_names)}, interactions={len(interaction_names)})")
 
-    interactions = _interaction_signals(frame, bins)
-    for name, groups in interactions.items():
-        signals.append((name, groups.astype("string"), "interaction"))
-
-    print(f"\n[Atlas] signals={len(signals)} (scalar={len(signals)-len(interactions)}, interactions={len(interactions)})")
     summaries: list[dict] = []
     long_parts: list[pd.DataFrame] = []
-    for idx, (name, groups, grouping) in enumerate(signals, start=1):
+    signal_names: list[str] = []
+    idx = 0
+
+    def run_signal(name: str, groups: pd.Series, grouping: str) -> None:
+        nonlocal idx
+        idx += 1
         summary, long = _audit_one(
-            name,
-            groups,
-            frame,
-            min_era_count=min_era_count,
-            min_year_count=min_year_count,
-            cohort_mask=cohort_mask,
+            name, groups, frame, min_era_count=min_era_count, min_year_count=min_year_count, cohort_mask=cohort_mask
         )
         summary["grouping"] = grouping
         summaries.append(summary)
         long_parts.append(long)
+        signal_names.append(name)
         shift = summary["old_recent_effect_rmse"]
         cp = summary["changepoint_2023_ratio"]
         shift_s = f"{shift:.5f}" if np.isfinite(shift) else "nan"
         cp_s = f"{cp:.2f}" if np.isfinite(cp) else "nan"
         print(
-            f"  [{idx:02d}/{len(signals):02d}] {name:<38} "
-            f"{summary['classification']:<22} shift={shift_s} cp={cp_s}"
+            f"  [{idx:02d}/{total:02d}] {name:<38} {summary['classification']:<22} "
+            f"shift={shift_s} cp={cp_s}"
         )
+
+    for feature in scalar_names:
+        groups, grouping, _ = _make_groups(frame[feature], feature in CATEGORICAL_HINTS, bins)
+        run_signal(feature, groups, grouping)
+        del groups
+        gc.collect()
+
+    for name in interaction_names:
+        groups = _build_interaction(frame, name, bins)
+        run_signal(name, groups, "interaction")
+        del groups
+        gc.collect()
 
     atlas = pd.DataFrame(summaries).sort_values(
         ["regime_score", "old_recent_effect_rmse"], ascending=[False, False], na_position="last"
@@ -578,7 +576,7 @@ def main() -> None:
     ].head(15)
     payload = {
         "purpose": "find evidence-driven expert tracks before training triple/quad ensembles",
-        "warning": "This is a model-free diagnostic. High regime_score is a hypothesis, not proof of causal regime change.",
+        "warning": "Model-free diagnostic only; a high regime score is a hypothesis, not causal proof.",
         "top_candidates": top.to_dict(orient="records"),
     }
     (output_dir / "top_regime_candidates.json").write_text(
@@ -596,7 +594,7 @@ def main() -> None:
         "same_pitcher_min_old": args.same_pitcher_min_old,
         "same_pitcher_min_recent": args.same_pitcher_min_recent,
         "rows": int(len(frame)),
-        "signals": [name for name, _, _ in signals],
+        "signals": signal_names,
     }
     (output_dir / "run_config.json").write_text(
         json.dumps(run_config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -620,8 +618,8 @@ def main() -> None:
     print("  - high old_recent_effect_rmse: target relationship changed across eras")
     print("  - high changepoint_2023_ratio: 2022->2023 is unusually abrupt")
     print("  - low post_2023_2024_rmse: new relationship persists into 2024")
-    print("  - same_pitcher_vs_all_ratio near 1: shift survives player-composition control")
-    print("  - high composition_js + low cohort ratio: likely composition-driven rather than a clean regime")
+    print("  - same_pitcher_vs_all_ratio near 1: shift survives pitcher-composition control")
+    print("  - high composition_js + low cohort ratio: likely composition-driven")
     print(f"\nSaved: {output_dir.resolve()}")
 
 
