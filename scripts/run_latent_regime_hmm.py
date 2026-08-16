@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import math
 import sys
 from pathlib import Path
@@ -52,12 +51,11 @@ def _numeric_monthly(frame: pd.DataFrame, col: str) -> pd.DataFrame:
     work = frame[["_month", col]].copy()
     work[col] = pd.to_numeric(work[col], errors="coerce")
     g = work.groupby("_month", sort=True, observed=True)[col]
-    out = pd.DataFrame({
+    return pd.DataFrame({
         f"{col}__mean": g.mean(),
         f"{col}__std": g.apply(_safe_std),
         f"{col}__median": g.median(),
     })
-    return out
 
 
 def _categorical_monthly(frame: pd.DataFrame, col: str, max_levels: int) -> pd.DataFrame:
@@ -107,7 +105,7 @@ def build_monthly_matrix(
     for col in numeric_cols:
         blocks.append(_numeric_monthly(work, col))
     for col in cat_cols:
-        blocks.append(_categorical_monthly(work, col, max_cat_levels=max_cat_levels))
+        blocks.append(_categorical_monthly(work, col, max_levels=max_cat_levels))
 
     if not blocks:
         raise RuntimeError("no usable monthly features")
@@ -117,14 +115,12 @@ def build_monthly_matrix(
     monthly = monthly.loc[:, monthly.notna().any(axis=0)]
     monthly = monthly.fillna(monthly.median(numeric_only=True)).fillna(0.0)
 
-    # Remove constants before scaling/PCA.
     std = monthly.std(axis=0, ddof=0)
     monthly = monthly.loc[:, std.gt(1e-12)]
     return monthly, list(monthly.columns)
 
 
 def _hmm_parameter_count(k: int, d: int, covariance_type: str) -> int:
-    # start probabilities + transition matrix + means + covariance parameters.
     n = (k - 1) + k * (k - 1) + k * d
     if covariance_type == "diag":
         n += k * d
@@ -180,7 +176,7 @@ def fit_hmm_grid(
                 if np.isfinite(bic) and bic < best_bic:
                     best_bic = bic
                     best_model = model
-            except Exception as exc:  # diagnostic grid should continue
+            except Exception as exc:
                 rows.append({
                     "states": k,
                     "seed": seed,
@@ -222,14 +218,12 @@ def _feature_importance(monthly: pd.DataFrame, state: np.ndarray) -> pd.DataFram
 
 
 def _target_diagnostic(frame: pd.DataFrame, posterior: pd.DataFrame, target_col: str) -> pd.DataFrame:
-    # Diagnostic only: inferred states come from X, not y. Do not use this table to refit the HMM.
     work = frame[["season", "game_month", target_col]].copy()
     work["year_month"] = _month_key(work)
     work[target_col] = pd.to_numeric(work[target_col], errors="coerce")
     month_y = work.groupby("year_month", sort=True)[target_col].agg(["size", "mean"]).reset_index()
     month_y = month_y.rename(columns={"size": "rows", "mean": "target_rate"})
-    out = posterior.merge(month_y, on="year_month", how="left", validate="one_to_one")
-    return out
+    return posterior.merge(month_y, on="year_month", how="left", validate="one_to_one")
 
 
 def run_one(
@@ -292,7 +286,6 @@ def run_one(
     diag = _target_diagnostic(frame, posterior_df, target_col)
     diag.to_csv(run_dir / "target_diagnostic.csv", index=False)
 
-    # Explicitly inspect the known breakpoint neighborhood without using it to fit/select.
     around = posterior_df.loc[posterior_df["year_month"].between(202210, 202310)].copy()
     around.to_csv(run_dir / "breakpoint_neighborhood.csv", index=False)
 
