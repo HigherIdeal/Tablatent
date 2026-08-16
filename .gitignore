@@ -1,5 +1,4 @@
 data/
-.venv/
 
 # Generated experiment outputs stay local. Keep only placeholder directories.
 outputs/*
