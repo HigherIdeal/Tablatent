@@ -76,5 +76,5 @@ Because CUDA_VISIBLE_DEVICES=2 isolates physical GPU 2, scripts should use their
 normal logical GPU argument '--devices 0' (not 2) inside this shell.
 
 Prepare data once:
-  python scripts/prepare_data.py --config configs/default.yaml
+  python scripts/prepare_data.py
 EOF
