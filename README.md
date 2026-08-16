@@ -28,7 +28,7 @@ Latest experiment conclusions are in `EXPERIMENT_STATUS_2026-08-16.md`.
 
 ## Fresh 4x RTX 4090 server
 
-Project policy: **use physical GPU 2 only**.
+Project policy: **use physical GPU 2 only** and use a **Conda environment named `tablatent`**.
 
 Clone the active branch:
 
@@ -43,10 +43,12 @@ Bootstrap once:
 bash scripts/bootstrap_4090_gpu2.sh
 ```
 
+The bootstrap creates/reuses `conda` env `tablatent` with Python 3.11, installs the pinned GPU stack and project requirements, isolates physical GPU 2, and runs PyTorch/CatBoost GPU smoke tests.
+
 For every new shell:
 
 ```bash
-source .venv/bin/activate
+conda activate tablatent
 source scripts/activate_gpu2.sh
 ```
 
@@ -123,9 +125,11 @@ scripts/run_latent_regime_robustness.py
 scripts/run_recency_weighted_full_expert.py
 ```
 
-Example under the GPU2-isolated server shell:
+Example under the GPU2-isolated Conda shell:
 
 ```bash
+conda activate tablatent
+source scripts/activate_gpu2.sh
 python scripts/run_gated_r_specialist_suite.py \
   --config configs/default.yaml \
   --task-type GPU \
@@ -136,16 +140,17 @@ Because physical GPU 2 has been isolated by `CUDA_VISIBLE_DEVICES=2`, `--devices
 
 ## Performance policy
 
-Do not alter model semantics merely to occupy more GPU memory. Current CatBoost GPU training already uses GPU-resident categorical storage by default and can use most available GPU memory. Keep score-affecting settings such as tree depth, border count, training window, and feature policy controlled by the experiment rather than by server size.
+Do not alter model semantics merely to occupy more GPU memory. Keep score-affecting settings such as tree depth, border count, training window, and feature policy controlled by the experiment rather than by server size.
 
-The main speed strategy is instead:
+The main speed strategy is:
 
 - physical GPU 2 isolation;
 - local processed-data storage;
 - prediction/artifact reuse where supported;
 - GPU CatBoost for every fit;
+- low logging overhead;
 - one large training job on GPU 2 at a time;
-- server-specific larger PyTorch batches only for future neural experiments after a memory probe.
+- larger PyTorch batches only for future neural experiments after a memory probe.
 
 ## Legacy representation-learning experiments
 
