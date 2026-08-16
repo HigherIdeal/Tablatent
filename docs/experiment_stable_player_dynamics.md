@@ -2,25 +2,25 @@
 
 ## 1. Hypothesis and Scope
 
-The current primary system is the gated dual-track CatBoost ensemble with an R-fast specialist. Do **not** replace it yet. This experiment tests only whether a compact temporal representation of pitcher-specific, regime-stable signals adds information that the current row-wise CatBoost features do not already contain.
+The current primary system is the gated dual-track CatBoost ensemble with an R-fast specialist. Do **not** replace it. The temporal experiment asks whether a compact representation of pitcher-specific, low-regime-drift signals contains information not already available to the row-wise CatBoost system.
 
 Observed regime diagnostics motivating the experiment:
 
 - `game_type` has a dominant persistent breakpoint at **2023-04** (`score≈0.1446`), reproduced for 5/8/12 bins.
 - Several long-run success/reverse signals also show historical breakpoints and therefore should not be treated as stable player identity/state.
-- A smaller set of pitcher-state deltas and pitch-mix/control signals show low regime drift and are better candidates for temporal modeling.
+- A smaller set of pitcher-state deltas and pitch-mix/control signals have no comparably strong breakpoint and are better candidates for temporal modeling.
 
 The intended decomposition is:
 
 `prediction = current regime/context model + stable player dynamics`
 
-The GRU branch must model **player trajectory only**. Regime-sensitive context (`game_type`, season-level shift, current count/base/game context) remains with CatBoost.
+The GRU branch models **player trajectory only**. Regime-sensitive context (`game_type`, current count/base/game context, and the full-vs-recent regime mixture) remains with CatBoost.
 
-## 2. Experimental Design
+## 2. Phase 1: Representation Probe
 
 ### Stable temporal inputs
 
-Initial fixed candidate set, chosen from the low-drift side of the monthly atlas and restricted to pitcher-specific pre-pitch state:
+Initial fixed candidate set, restricted to pitcher-specific pre-pitch state:
 
 - `asof_pitcher_middle_rate`
 - `asof_pitcher_ball_rate`
@@ -37,79 +37,85 @@ Initial fixed candidate set, chosen from the low-drift side of the monthly atlas
 - `eng_ps_recent_mean_minus_long`
 - `eng_ps_recent_range_135`
 
-`asof_pitcher_n` and monthly pitch count are used only as reliability/exposure inputs. `game_type`, team IDs, batter features, and regime-sensitive long-run success/reverse rates are deliberately excluded from the temporal encoder.
+`asof_pitcher_n` and monthly pitch count are reliability/exposure inputs only. `game_type`, team IDs, batter features, and the strongly regime-sensitive long-run success/reverse rates are excluded from the temporal encoder.
 
-### Temporal unit
+Aggregate to `pitcher_id × season × game_month` using monthly medians for rates/deltas, monthly maximum for `asof_pitcher_n`, and row count for exposure. The embedding attached to month `t` is generated only from months **strictly before `t`**.
 
-Aggregate to `pitcher_id × season × game_month`.
-
-- Rates/deltas: monthly median.
-- `asof_pitcher_n`: monthly max then `log1p`.
-- Exposure: `log1p(rows in pitcher-month)`.
-
-The embedding attached to month `t` is generated from months **strictly before `t`**. Current-month rows never contribute to their own embedding.
-
-### GRU objective
-
-Use a small GRU (`hidden≈24`, 1 layer by default). It is **not** trained on `control_success`.
-
-Self-supervised objective:
+The small GRU (`hidden=24` by default) is self-supervised:
 
 `history of stable monthly state -> next-month stable state`
 
-This is intentional: the temporal encoder must not learn validation labels or become another opaque target model. CatBoost remains the supervised predictor.
+It never uses `control_success`.
 
-### Outer folds
-
-Use strict season-forward folds:
+Initial season-forward probe:
 
 - train `<=2021`, validate `2022`
-- train `<=2022`, validate `2023`  ← primary regime-crossing diagnostic
+- train `<=2022`, validate `2023`
 - train `<=2023`, validate `2024`
 
-The GRU scaler and GRU weights are fit separately inside each outer fold using only months from the outer training period.
+Ablations: `base`, `lag1`, `gru`, `gru_lag1`.
 
-### Ablations
+Observed result from the first run:
 
-For each fold train the same CatBoost configuration with:
+- 2022: all temporal variants slightly degraded the simple CatBoost baseline.
+- 2023: `lag1`, `gru`, and especially `gru_lag1` improved the baseline; `gru_lag1` changed Brier by about `-0.000200`.
+- 2024: temporal variants again slightly degraded the simple CatBoost baseline by roughly `+0.00002~0.00003` Brier.
 
-1. `base`: current row-wise recent-raw feature set only.
-2. `lag1`: base + previous observed pitcher-month stable state.
-3. `gru`: base + causal GRU hidden state.
-4. `gru_lag1`: base + both.
+This does **not** justify rejecting the temporal hypothesis because the absolute 2023 collapse is already known to affect ordinary CatBoost across the 2023 regime boundary. Phase 1 used a simple CatBoost baseline, not the current regime-aware production architecture.
 
-`lag1` is essential. If GRU only beats `base` but not `lag1`, the gain is likely from adding a missing lagged statistic rather than learned temporal dynamics.
+## 3. Phase 2: Regime-Aware Integration
 
-## 3. Decision Rules and Guardrails
+Phase 2 tests the temporal feature in the model family that actually handles the observed regime change:
 
-Primary metric is Brier score / raw Brier skill score. Do not select the method by AUC.
+`full_raw expert + recent_raw expert + R-fast specialist -> fixed gated prediction`
 
-Promote the temporal branch to the gated dual-track + R-fast system only if:
+Only the **recent_raw expert** is modified. The full-history expert and R-fast specialist remain identical across variants. This isolates whether temporal player state improves the post-break/recent branch without confounding the already validated gate architecture.
 
-- `gru` or `gru_lag1` improves the **2023** fold versus both `base` and `lag1`;
-- the same variant is non-degrading or positive on **2024**;
-- the weighted multi-fold result is positive without a large worst-fold regression.
+Variants:
 
-Hard guardrails:
+1. `base`: current recent_raw expert.
+2. `lag1`: recent_raw + previous pitcher-month state.
+3. `gru`: recent_raw + causal GRU hidden state.
+4. `gru_lag1`: recent_raw + both.
 
-- No `control_success` is used to train the GRU.
-- No current/future month contributes to the embedding used for that month.
-- GRU normalization statistics are fit on outer-train months only.
-- Do not interpret a detected breakpoint as causal.
-- Do not add `game_type` to the temporal encoder; the whole point is to isolate stable player dynamics from the 2023 regime break.
-- Do not tune GRU depth/hidden size aggressively before the fixed small model demonstrates signal.
-- Do not package a submission from this experiment until the ablation passes; phase 1 is representation validation only.
+The ensemble weights are fixed during this test (`alpha_recent=0.20`, `beta_r=0.10` by default); they are **not retuned** on the temporal experiment.
+
+Use the established 2025 proxy folds:
+
+- `season_forward_2024`: recent expert trains on 2023, full expert through 2023, validates all 2024.
+- `mid_2024`: expanding history through 2024-05, validates 2024-06~07.
+- `late_2024`: expanding history through 2024-07, validates 2024-08 onward.
+
+The latter two folds are especially important because both training and validation are inside the post-2023 regime. GRU/scaler fitting stops at each fold cutoff. A validation-month embedding may use earlier validation months only when they are chronologically prior; it never uses its current or future month.
+
+Promotion criterion:
+
+- `gru` or `gru_lag1` should improve weighted proxy Brier versus `base`;
+- improvement should not come only from the season-forward fold;
+- at least one of `mid_2024` / `late_2024` should improve, preferably both;
+- `gru` must be compared with `lag1` so a simple missing-lag effect is not mislabeled as learned temporal dynamics.
 
 Run:
 
 ```bash
-python scripts/run_stable_player_dynamics.py \
+python scripts/run_regime_aware_stable_dynamics.py \
   --config configs/default.yaml \
-  --folds 2022,2023,2024 \
-  --iterations 300 \
+  --iterations 500 \
+  --alpha-recent 0.20 \
+  --beta-r 0.10 \
   --torch-device auto \
   --task-type GPU \
   --devices 0
 ```
 
-Outputs are written to `outputs/stable_player_dynamics/`.
+Outputs are written to `outputs/regime_aware_stable_dynamics/`.
+
+Hard guardrails:
+
+- No `control_success` is used to train the GRU.
+- No current/future month contributes to the embedding for a row.
+- GRU normalization and weights are fit only through each proxy training cutoff.
+- `game_type` never enters the GRU; it remains in the CatBoost regime/context path.
+- Full-history and R-fast branches are held fixed across temporal variants.
+- No alpha/beta tuning is allowed in this phase.
+- Do not package a submission until the regime-aware proxy test is positive.
