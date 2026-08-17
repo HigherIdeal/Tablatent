@@ -1,10 +1,17 @@
 data/
+
+# Generated experiment outputs stay local. Keep only placeholder directories.
+outputs/*
+!outputs/checkpoints/
+!outputs/latents/
+!outputs/logs/
 outputs/checkpoints/*
 outputs/latents/*
 outputs/logs/*
 !outputs/checkpoints/.gitkeep
 !outputs/latents/.gitkeep
 !outputs/logs/.gitkeep
+
 dist/
 __pycache__/
 *.py[cod]
