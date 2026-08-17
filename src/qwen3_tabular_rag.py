@@ -1,12 +1,8 @@
 #!/usr/bin/env python3
-"""Lightweight temporal-safe tabular RAG for Qwen3-1.7B.
+"""Temporal-safe tabular RAG for the offline Qwen3-1.7B experiment.
 
-No embedding model is used. Retrieval is deterministic Python logic over train.csv:
-1) only rows from seasons strictly earlier than the query season are eligible;
-2) candidates are narrowed by pitcher/count/hand context with progressive fallback;
-3) a small set of representative historical examples and empirical rates is returned.
-
-The LLM is the only learned model in this experiment.
+No embedding/learned retrieval model is used. Python performs deterministic
+historical lookup only; Qwen3-1.7B remains the sole learned predictor.
 """
 
 from __future__ import annotations
@@ -19,8 +15,6 @@ import pandas as pd
 
 TARGET = "control_success"
 
-# Stable context columns known to exist in the competition table. Missing columns
-# are simply ignored so the retriever remains robust to processed variants.
 CONTEXT_COLUMNS = [
     "season",
     "game_month",
@@ -31,29 +25,58 @@ CONTEXT_COLUMNS = [
     "balls_before",
     "strikes_before",
     "outs_before",
+    "base_state",
     "base_state_before",
+    "runners",
     "pitcher_id",
     "batter_id",
     "pitcher_hand",
     "batter_hand",
     "pitcher_team_id",
     "batter_team_id",
-    "score_diff_before",
+    "run_top",
+    "run_bot",
+    "run_total",
     "run_top_before",
     "run_bot_before",
+    "score_diff",
+    "score_diff_before",
+    "win_expectancy",
     "win_expectancy_before",
+    "li",
     "leverage_index_before",
 ]
 
-# History/as-of columns are particularly useful to an LLM because their meaning
-# is explicit. We include any columns with these prefixes if present.
-HISTORY_PREFIXES = ("asof_", "prev1_", "prev3_", "prev5_")
+FEATURE_PREFIXES = ("asof_", "prev1_", "prev3_", "prev5_", "tm_")
+MATCH_COLUMNS = {
+    "balls_before",
+    "strikes_before",
+    "outs_before",
+    "pitcher_hand",
+    "batter_hand",
+    "base_state",
+    "base_state_before",
+    "batter_id",
+}
 
 
 @dataclass
 class RetrievalResult:
     name: str
     payload: dict[str, Any]
+
+
+def canonical(value: Any) -> str:
+    if value is None or pd.isna(value):
+        return "<NA>"
+    if isinstance(value, (int, np.integer)):
+        return str(int(value))
+    if isinstance(value, (float, np.floating)):
+        number = float(value)
+        if number.is_integer():
+            return str(int(number))
+        return format(number, ".12g")
+    return str(value).strip()
 
 
 class TemporalTabularRAG:
@@ -68,42 +91,72 @@ class TemporalTabularRAG:
         self._target = pd.to_numeric(self.train[TARGET], errors="coerce").to_numpy(dtype=float)
         self._pitcher_groups = self._group_indices("pitcher_id")
         self._batter_groups = self._group_indices("batter_id")
+        self._prior_index_cache: dict[int, np.ndarray] = {}
+        self._context_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
+        self._string_arrays: dict[str, np.ndarray] = {}
+        for column in MATCH_COLUMNS:
+            if column in self.train.columns:
+                self._string_arrays[column] = np.asarray(
+                    [canonical(value) for value in self.train[column].to_numpy()],
+                    dtype=object,
+                )
 
     def _group_indices(self, column: str) -> dict[str, np.ndarray]:
         if column not in self.train.columns:
             return {}
-        groups: dict[str, np.ndarray] = {}
-        values = self.train[column].astype("string")
-        for key, idx in values.groupby(values, dropna=True).groups.items():
-            groups[str(key)] = np.asarray(idx, dtype=np.int64)
-        return groups
+        groups: dict[str, list[int]] = {}
+        for idx, value in enumerate(self.train[column].to_numpy()):
+            key = canonical(value)
+            if key == "<NA>":
+                continue
+            groups.setdefault(key, []).append(idx)
+        return {key: np.asarray(values, dtype=np.int64) for key, values in groups.items()}
 
     @staticmethod
     def _scalar(value: Any) -> Any:
         if value is None or pd.isna(value):
             return None
-        if isinstance(value, (np.integer,)):
+        if isinstance(value, np.integer):
             return int(value)
-        if isinstance(value, (np.floating,)):
-            return float(value)
+        if isinstance(value, np.floating):
+            number = float(value)
+            return number if np.isfinite(number) else None
         return value
+
+    def prior_indices(self, season: int) -> np.ndarray:
+        season = int(season)
+        cached = self._prior_index_cache.get(season)
+        if cached is None:
+            cached = np.flatnonzero(self._season < season).astype(np.int64)
+            self._prior_index_cache[season] = cached
+        return cached
+
+    def prior_rate(self, season: int) -> float:
+        payload = self._rate_payload(self.prior_indices(season))
+        value = payload.get("success_rate")
+        return 0.5 if value is None else float(value)
 
     def _before(self, indices: np.ndarray, season: int) -> np.ndarray:
         if indices.size == 0:
             return indices
-        return indices[self._season[indices] < season]
+        return indices[self._season[indices] < int(season)]
 
     def _match(self, indices: np.ndarray, query: pd.Series, columns: list[str]) -> np.ndarray:
         out = indices
         for column in columns:
             if column not in self.train.columns or column not in query.index:
                 continue
-            value = query[column]
-            if pd.isna(value):
+            value = canonical(query[column])
+            if value == "<NA>":
                 continue
-            series = self.train.loc[out, column]
-            mask = series.astype("string").to_numpy() == str(value)
-            out = out[mask]
+            values = self._string_arrays.get(column)
+            if values is None:
+                values = np.asarray(
+                    [canonical(item) for item in self.train[column].to_numpy()],
+                    dtype=object,
+                )
+                self._string_arrays[column] = values
+            out = out[values[out] == value]
             if out.size == 0:
                 break
         return out
@@ -121,122 +174,135 @@ class TemporalTabularRAG:
 
     def pitcher_history(self, query: pd.Series) -> RetrievalResult:
         season = int(query["season"])
-        key = str(query.get("pitcher_id"))
-        idx = self._before(self._pitcher_groups.get(key, np.empty(0, dtype=np.int64)), season)
+        idx = self._before(
+            self._pitcher_groups.get(canonical(query.get("pitcher_id")), np.empty(0, dtype=np.int64)),
+            season,
+        )
         payload = self._rate_payload(idx)
         if idx.size:
             seasons = self._season[idx]
             latest = int(np.nanmax(seasons))
-            latest_idx = idx[seasons == latest]
             payload["latest_prior_season"] = latest
-            payload["latest_prior_season_stats"] = self._rate_payload(latest_idx)
+            payload["latest_prior_season_stats"] = self._rate_payload(idx[seasons == latest])
         return RetrievalResult("pitcher_history", payload)
 
     def batter_history(self, query: pd.Series) -> RetrievalResult:
         season = int(query["season"])
-        key = str(query.get("batter_id"))
-        idx = self._before(self._batter_groups.get(key, np.empty(0, dtype=np.int64)), season)
+        idx = self._before(
+            self._batter_groups.get(canonical(query.get("batter_id")), np.empty(0, dtype=np.int64)),
+            season,
+        )
         return RetrievalResult("batter_history", self._rate_payload(idx))
 
     def context_history(self, query: pd.Series) -> RetrievalResult:
         season = int(query["season"])
-        base = np.flatnonzero(self._season < season).astype(np.int64)
+        base_column = "base_state" if "base_state" in self.train.columns else "base_state_before"
         levels = [
-            ["balls_before", "strikes_before", "outs_before", "pitcher_hand", "batter_hand", "base_state_before"],
+            ["balls_before", "strikes_before", "outs_before", "pitcher_hand", "batter_hand", base_column],
             ["balls_before", "strikes_before", "outs_before", "pitcher_hand", "batter_hand"],
             ["balls_before", "strikes_before", "outs_before"],
             ["balls_before", "strikes_before"],
         ]
+        base = self.prior_indices(season)
         chosen = base
         used: list[str] = []
         for columns in levels:
-            candidate = self._match(base, query, columns)
+            present = [column for column in columns if column in self.train.columns and column in query.index]
+            cache_key = (season, *[(column, canonical(query[column])) for column in present])
+            cached = self._context_cache.get(cache_key)
+            if cached is not None:
+                if cached["n"] >= 100:
+                    return RetrievalResult("context_history", dict(cached))
+                continue
+            candidate = self._match(base, query, present)
+            payload = self._rate_payload(candidate)
+            payload["matched_on"] = present
+            self._context_cache[cache_key] = payload
             if candidate.size >= 100:
+                return RetrievalResult("context_history", dict(payload))
+            if candidate.size > 0:
                 chosen = candidate
-                used = [c for c in columns if c in self.train.columns]
-                break
+                used = present
         payload = self._rate_payload(chosen)
         payload["matched_on"] = used
         return RetrievalResult("context_history", payload)
 
     def matchup_history(self, query: pd.Series) -> RetrievalResult:
         season = int(query["season"])
-        pitcher_key = str(query.get("pitcher_id"))
-        idx = self._before(self._pitcher_groups.get(pitcher_key, np.empty(0, dtype=np.int64)), season)
+        idx = self._before(
+            self._pitcher_groups.get(canonical(query.get("pitcher_id")), np.empty(0, dtype=np.int64)),
+            season,
+        )
         idx = self._match(idx, query, ["batter_id"])
         return RetrievalResult("matchup_history", self._rate_payload(idx))
 
     def similar_examples(self, query: pd.Series, k: int = 12) -> RetrievalResult:
         season = int(query["season"])
-        pitcher_key = str(query.get("pitcher_id"))
-        pitcher_idx = self._before(self._pitcher_groups.get(pitcher_key, np.empty(0, dtype=np.int64)), season)
-
+        k = int(np.clip(k, 4, 20))
+        pitcher_idx = self._before(
+            self._pitcher_groups.get(canonical(query.get("pitcher_id")), np.empty(0, dtype=np.int64)),
+            season,
+        )
+        all_prior = self.prior_indices(season)
         candidate_specs = [
             (pitcher_idx, ["balls_before", "strikes_before", "batter_hand"]),
             (pitcher_idx, ["balls_before", "strikes_before"]),
             (pitcher_idx, []),
-        ]
-        all_prior = np.flatnonzero(self._season < season).astype(np.int64)
-        candidate_specs.extend([
             (all_prior, ["balls_before", "strikes_before", "outs_before", "pitcher_hand", "batter_hand"]),
             (all_prior, ["balls_before", "strikes_before", "pitcher_hand", "batter_hand"]),
-        ])
+        ]
 
         selected = np.empty(0, dtype=np.int64)
         matched_on: list[str] = []
+        total_candidates = 0
         for base, columns in candidate_specs:
             if base.size == 0:
                 continue
             candidate = self._match(base, query, columns)
-            if candidate.size >= k:
-                selected = candidate
-                matched_on = [c for c in columns if c in self.train.columns]
-                break
             if candidate.size > selected.size:
                 selected = candidate
-                matched_on = [c for c in columns if c in self.train.columns]
+                matched_on = [column for column in columns if column in self.train.columns]
+                total_candidates = int(candidate.size)
+            if candidate.size >= k:
+                selected = candidate
+                matched_on = [column for column in columns if column in self.train.columns]
+                total_candidates = int(candidate.size)
+                break
 
         if selected.size == 0:
-            return RetrievalResult("similar_examples", {"matched_on": [], "examples": []})
+            return RetrievalResult("similar_examples", {"matched_on": [], "candidate_count": 0, "examples": []})
 
-        # Prefer recent history, while keeping deterministic diversity.
+        # Recent seasons first; sample deterministically from a bounded recent pool.
         order = np.lexsort((selected, -self._season[selected]))
-        selected = selected[order]
-        if selected.size > max(k * 8, k):
-            selected = selected[: k * 8]
-
-        rng = np.random.default_rng(self.seed + int(query.name if isinstance(query.name, (int, np.integer)) else 0))
+        selected = selected[order][: max(k * 8, k)]
+        seed_offset = int(query.name) if isinstance(query.name, (int, np.integer)) else 0
+        rng = np.random.default_rng(self.seed + seed_offset)
         if selected.size > k:
-            pick = np.sort(rng.choice(selected.size, size=k, replace=False))
-            selected = selected[pick]
+            selected = selected[np.sort(rng.choice(selected.size, size=k, replace=False))]
 
-        display_columns = [c for c in CONTEXT_COLUMNS if c in self.train.columns]
-        history_columns = [
-            c for c in self.train.columns
-            if c.startswith(HISTORY_PREFIXES)
-        ]
-        # Keep prompts compact: only a bounded number of history fields.
-        display_columns += history_columns[:12]
+        display_columns = [column for column in CONTEXT_COLUMNS if column in self.train.columns]
+        extra_columns = [column for column in self.train.columns if column.startswith(FEATURE_PREFIXES)]
+        display_columns += extra_columns[:12]
         examples = []
         for idx in selected:
             row = self.train.iloc[int(idx)]
-            item = {c: self._scalar(row[c]) for c in display_columns}
+            item = {column: self._scalar(row[column]) for column in display_columns}
             item[TARGET] = self._scalar(row[TARGET])
             examples.append(item)
         return RetrievalResult(
             "similar_examples",
             {
                 "matched_on": matched_on,
-                "candidate_count": int(selected.size),
+                "candidate_count": total_candidates,
                 "examples": examples,
             },
         )
 
     def query_snapshot(self, query: pd.Series) -> dict[str, Any]:
-        columns = [c for c in CONTEXT_COLUMNS if c in query.index]
-        history_columns = [c for c in query.index if c.startswith(HISTORY_PREFIXES)]
-        columns += history_columns[:20]
-        return {c: self._scalar(query[c]) for c in columns}
+        columns = [column for column in CONTEXT_COLUMNS if column in query.index]
+        extra_columns = [column for column in query.index if column.startswith(FEATURE_PREFIXES)]
+        columns += extra_columns[:20]
+        return {column: self._scalar(query[column]) for column in columns}
 
     def call(self, name: str, query: pd.Series, **kwargs: Any) -> RetrievalResult:
         if name == "pitcher_history":
