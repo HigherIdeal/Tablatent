@@ -1,0 +1,5 @@
+# Qwen3-1.7B tabular-RAG experiment only.
+# Install after the base requirements.txt.
+torch>=2.6
+transformers>=4.51.0
+accelerate>=1.0
