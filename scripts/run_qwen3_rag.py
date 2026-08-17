@@ -5,7 +5,7 @@ Only Qwen/Qwen3-1.7B is a learned model. Python performs deterministic
 historical lookup and tool execution. Inference never accesses the network.
 
 The LLM is evaluated in batches. Every active query in a batch advances one
-tool/final-action round together, which keeps GPU utilization much higher than
+tool/final-action round together, keeping GPU utilization much higher than
 row-by-row generation.
 """
 
@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Network access is disabled before transformers is imported.
+# Disable network access before importing transformers.
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
@@ -42,6 +42,11 @@ from qwen3_tabular_rag import TARGET, TemporalTabularRAG  # noqa: E402
 DEFAULT_MODEL_DIR = ROOT / "models" / "Qwen3-1.7B"
 DEFAULT_TRAIN = ROOT / "data" / "raw" / "train.csv"
 DEFAULT_OUTPUT = ROOT / "outputs" / "qwen3_1p7b_rag"
+
+# Competition-style score used throughout this repository:
+# Brier=0.25 -> 0 points, and lower Brier is better.
+REFERENCE_BRIER = 0.25
+SCORE_SCALE = 100_000.0
 
 SYSTEM_PROMPT = """You are a calibrated probabilistic baseball forecaster.
 Predict control_success for one future pitch.
@@ -130,6 +135,7 @@ def extract_json(text: str) -> dict[str, Any] | None:
         return value if isinstance(value, dict) else None
     except json.JSONDecodeError:
         pass
+
     decoder = json.JSONDecoder()
     for match in re.finditer(r"\{", text):
         try:
@@ -139,6 +145,15 @@ def extract_json(text: str) -> dict[str, Any] | None:
         except json.JSONDecodeError:
             continue
     return None
+
+
+def brier(y: np.ndarray, p: np.ndarray) -> float:
+    return float(np.mean((p - y) ** 2))
+
+
+def official_style_score(brier_value: float) -> float:
+    """Repository/competition-style score from Brier score."""
+    return float(SCORE_SCALE * (1.0 - brier_value / REFERENCE_BRIER))
 
 
 def validate_local_model_dir(path: Path) -> Path:
@@ -171,8 +186,6 @@ def load_model(args: argparse.Namespace) -> tuple[Any, Any, Path]:
     tokenizer = AutoTokenizer.from_pretrained(
         str(model_dir), local_files_only=True, trust_remote_code=False
     )
-    # Decoder-only batched generation must use left padding so the newest token
-    # of every prompt is aligned at the right edge.
     tokenizer.padding_side = "left"
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -184,6 +197,7 @@ def load_model(args: argparse.Namespace) -> tuple[Any, Any, Path]:
     }
     if args.device == "auto":
         kwargs["device_map"] = "auto"
+
     model = AutoModelForCausalLM.from_pretrained(str(model_dir), **kwargs)
     if args.device != "auto":
         model = model.to(torch.device(args.device))
@@ -204,7 +218,7 @@ def generate_actions(
     message_batches: list[list[dict[str, str]]],
     max_new_tokens: int,
 ) -> list[tuple[dict[str, Any] | None, str]]:
-    """Generate one action for every active conversation in a single GPU call."""
+    """Generate one action per active conversation in one GPU call."""
     prompts = [
         tokenizer.apply_chat_template(
             messages,
@@ -429,9 +443,7 @@ def run_agents_batch(
     outcomes: list[tuple[float, list[dict[str, Any]], str]] = []
     for state in states:
         if state["probability"] is None:
-            probability = float(
-                np.clip(state["prior"], 1e-5, 1 - 1e-5)
-            )
+            probability = float(np.clip(state["prior"], 1e-5, 1 - 1e-5))
             status = "fallback_prior"
         else:
             probability = float(state["probability"])
@@ -459,12 +471,9 @@ def load_frames(args: argparse.Namespace) -> tuple[pd.DataFrame, pd.DataFrame]:
         query = query.iloc[args.offset:]
     if args.limit > 0:
         query = query.iloc[: args.limit]
+
     query = query.reset_index(drop=False).rename(columns={"index": "source_index"})
     return train, query
-
-
-def brier(y: np.ndarray, p: np.ndarray) -> float:
-    return float(np.mean((p - y) ** 2))
 
 
 def main() -> None:
@@ -482,9 +491,7 @@ def main() -> None:
     query_seasons = sorted(
         {
             int(value)
-            for value in pd.to_numeric(
-                query["season"], errors="raise"
-            ).tolist()
+            for value in pd.to_numeric(query["season"], errors="raise").tolist()
         }
     )
     prior_by_season = {
@@ -502,19 +509,31 @@ def main() -> None:
         existing = pd.read_csv(prediction_path)
         done = len(existing)
         if done > len(query):
-            raise ValueError(
-                "resume file has more rows than current query slice"
-            )
+            raise ValueError("resume file has more rows than current query slice")
         rows.extend(existing.to_dict(orient="records"))
         print(f"[resume] {done:,} predictions")
+
+    # Initialize running validation metrics, including resumed rows.
+    running_sse = 0.0
+    running_n = 0
+    for item in rows:
+        if TARGET in item and pd.notna(item[TARGET]) and pd.notna(item.get("probability")):
+            error = float(item["probability"]) - float(item[TARGET])
+            running_sse += error * error
+            running_n += 1
 
     print(
         f"[batch] batch_size={args.batch_size}, "
         f"rows={len(query):,}, max_tool_calls={args.max_tool_calls}"
     )
+    print(
+        f"[score] formula={SCORE_SCALE:.0f} * "
+        f"(1 - Brier/{REFERENCE_BRIER})"
+    )
 
     trace_mode = "a" if done and args.resume else "w"
     newly_saved = 0
+
     with trace_path.open(trace_mode, encoding="utf-8") as trace_file:
         batch_starts = range(done, len(query), args.batch_size)
         progress = tqdm(
@@ -557,8 +576,14 @@ def main() -> None:
                         "tool_name" in item for item in trace
                     ),
                 }
+
                 if TARGET in row.index and not pd.isna(row[TARGET]):
-                    result[TARGET] = float(row[TARGET])
+                    target_value = float(row[TARGET])
+                    result[TARGET] = target_value
+                    error = probability - target_value
+                    running_sse += error * error
+                    running_n += 1
+
                 rows.append(result)
 
                 trace_file.write(
@@ -570,6 +595,14 @@ def main() -> None:
                     + "\n"
                 )
                 newly_saved += 1
+
+            if running_n:
+                running_brier = running_sse / running_n
+                running_score = official_style_score(running_brier)
+                progress.set_postfix(
+                    brier=f"{running_brier:.6f}",
+                    score=f"{running_score:.2f}",
+                )
 
             trace_file.flush()
             if newly_saved >= args.save_every or batch_end == len(query):
@@ -599,24 +632,44 @@ def main() -> None:
             predictions["tool_calls"].mean()
         ),
         "prior_by_query_season": prior_by_season,
+        "score_formula": (
+            f"{SCORE_SCALE:.0f} * (1 - Brier / {REFERENCE_BRIER})"
+        ),
     }
+
     if TARGET in predictions.columns:
         y = predictions[TARGET].to_numpy(dtype=float)
         p = predictions["probability"].to_numpy(dtype=float)
         valid = np.isfinite(y) & np.isfinite(p)
-        summary["brier"] = brier(y[valid], p[valid])
+
+        model_brier = brier(y[valid], p[valid])
+        model_score = official_style_score(model_brier)
+        summary["brier"] = model_brier
+        summary["official_style_score"] = model_score
+
         slice_prior = float(np.mean(y[valid]))
-        summary["slice_prior"] = slice_prior
-        summary["slice_prior_brier"] = brier(
+        slice_prior_brier = brier(
             y[valid],
             np.full(valid.sum(), slice_prior),
+        )
+        summary["slice_prior"] = slice_prior
+        summary["slice_prior_brier"] = slice_prior_brier
+        summary["slice_prior_official_style_score"] = official_style_score(
+            slice_prior_brier
         )
 
     (args.output_dir / "summary.json").write_text(
         json.dumps(summary, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
+
     print(json.dumps(summary, indent=2, ensure_ascii=False))
+    if "official_style_score" in summary:
+        print(
+            "[validation] "
+            f"Brier={summary['brier']:.8f} "
+            f"score={summary['official_style_score']:.2f}"
+        )
     print(f"predictions: {prediction_path}")
     print(f"traces: {trace_path}")
 
