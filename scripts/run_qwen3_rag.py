@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""Fully offline Qwen3-1.7B probabilistic forecaster with temporal-safe tabular RAG.
+"""Fully offline batched Qwen3-1.7B forecaster with temporal-safe tabular RAG.
 
 Only Qwen/Qwen3-1.7B is a learned model. Python performs deterministic
 historical lookup and tool execution. Inference never accesses the network.
+
+The LLM is evaluated in batches. Every active query in a batch advances one
+tool/final-action round together, which keeps GPU utilization much higher than
+row-by-row generation.
 """
 
 from __future__ import annotations
@@ -74,11 +78,38 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-tool-calls", type=int, default=4)
     parser.add_argument("--max-new-tokens", type=int, default=96)
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=8,
+        help="Number of independent query rows advanced together on the GPU.",
+    )
+    parser.add_argument(
+        "--save-every",
+        type=int,
+        default=256,
+        help="Rewrite predictions.csv after this many newly completed rows.",
+    )
     parser.add_argument("--model-dir", type=Path, default=DEFAULT_MODEL_DIR)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--resume", action="store_true")
     return parser.parse_args()
+
+
+def validate_args(args: argparse.Namespace) -> None:
+    if args.batch_size <= 0:
+        raise ValueError("--batch-size must be positive")
+    if args.max_tool_calls < 0:
+        raise ValueError("--max-tool-calls must be >= 0")
+    if args.max_new_tokens <= 0:
+        raise ValueError("--max-new-tokens must be positive")
+    if args.save_every <= 0:
+        raise ValueError("--save-every must be positive")
+    if args.limit < 0:
+        raise ValueError("--limit must be >= 0")
+    if args.offset < 0:
+        raise ValueError("--offset must be >= 0")
 
 
 def json_default(value: Any) -> Any:
@@ -119,9 +150,15 @@ def validate_local_model_dir(path: Path) -> Path:
         )
     if not (path / "config.json").is_file():
         raise FileNotFoundError(f"Missing config.json: {path}")
-    if not any((path / name).is_file() for name in ("model.safetensors", "model.safetensors.index.json")):
+    if not any(
+        (path / name).is_file()
+        for name in ("model.safetensors", "model.safetensors.index.json")
+    ):
         raise FileNotFoundError(f"Missing safetensors weights: {path}")
-    if not any((path / name).is_file() for name in ("tokenizer.json", "tokenizer_config.json")):
+    if not any(
+        (path / name).is_file()
+        for name in ("tokenizer.json", "tokenizer_config.json")
+    ):
         raise FileNotFoundError(f"Missing tokenizer files: {path}")
     return path
 
@@ -134,6 +171,12 @@ def load_model(args: argparse.Namespace) -> tuple[Any, Any, Path]:
     tokenizer = AutoTokenizer.from_pretrained(
         str(model_dir), local_files_only=True, trust_remote_code=False
     )
+    # Decoder-only batched generation must use left padding so the newest token
+    # of every prompt is aligned at the right edge.
+    tokenizer.padding_side = "left"
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
     kwargs: dict[str, Any] = {
         "torch_dtype": "auto",
         "local_files_only": True,
@@ -155,133 +198,246 @@ def model_device(model: Any) -> torch.device:
         return torch.device("cpu")
 
 
-def generate_action(
+def generate_actions(
     tokenizer: Any,
     model: Any,
-    messages: list[dict[str, str]],
+    message_batches: list[list[dict[str, str]]],
     max_new_tokens: int,
-) -> tuple[dict[str, Any] | None, str]:
-    prompt = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-        enable_thinking=False,
+) -> list[tuple[dict[str, Any] | None, str]]:
+    """Generate one action for every active conversation in a single GPU call."""
+    prompts = [
+        tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+        for messages in message_batches
+    ]
+    encoded = tokenizer(
+        prompts,
+        return_tensors="pt",
+        padding=True,
+        truncation=False,
     )
-    encoded = tokenizer(prompt, return_tensors="pt")
     device = model_device(model)
     encoded = {name: tensor.to(device) for name, tensor in encoded.items()}
+    prompt_width = encoded["input_ids"].shape[1]
+
     with torch.inference_mode():
         output = model.generate(
             **encoded,
             max_new_tokens=max_new_tokens,
             do_sample=False,
-            pad_token_id=tokenizer.eos_token_id,
+            pad_token_id=tokenizer.pad_token_id,
         )
-    generated = output[0, encoded["input_ids"].shape[1]:]
-    raw = tokenizer.decode(generated, skip_special_tokens=True).strip()
-    return extract_json(raw), raw
+
+    generated = output[:, prompt_width:]
+    raw_outputs = tokenizer.batch_decode(generated, skip_special_tokens=True)
+    return [(extract_json(raw.strip()), raw.strip()) for raw in raw_outputs]
 
 
 def query_message(snapshot: dict[str, Any]) -> str:
     return (
         "QUERY_ROW\n"
-        + json.dumps(snapshot, ensure_ascii=False, default=json_default, separators=(",", ":"))
+        + json.dumps(
+            snapshot,
+            ensure_ascii=False,
+            default=json_default,
+            separators=(",", ":"),
+        )
         + "\nUse retrieval tools as needed, then return the calibrated probability."
     )
 
 
-def run_agent(
-    query: pd.Series,
+def _tool_arguments(action: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    name = str(action.get("name", ""))
+    arguments = action.get("arguments") or {}
+    if not isinstance(arguments, dict):
+        arguments = {}
+    if name == "similar_examples":
+        try:
+            arguments["k"] = int(np.clip(int(arguments.get("k", 12)), 4, 20))
+        except (TypeError, ValueError):
+            arguments["k"] = 12
+    return name, arguments
+
+
+def run_agents_batch(
+    queries: list[pd.Series],
+    priors: list[float],
     rag: TemporalTabularRAG,
     tokenizer: Any,
     model: Any,
     max_tool_calls: int,
     max_new_tokens: int,
-    prior: float,
-) -> tuple[float, list[dict[str, Any]], str]:
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": query_message(rag.query_snapshot(query))},
-    ]
-    trace: list[dict[str, Any]] = []
-    used_tools: set[str] = set()
+) -> list[tuple[float, list[dict[str, Any]], str]]:
+    """Advance multiple independent tool-using agents synchronously by round."""
+    if len(queries) != len(priors):
+        raise ValueError("queries/priors length mismatch")
+
+    states: list[dict[str, Any]] = []
+    for query, prior in zip(queries, priors):
+        states.append(
+            {
+                "query": query,
+                "prior": float(prior),
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": query_message(rag.query_snapshot(query)),
+                    },
+                ],
+                "trace": [],
+                "used_tools": set(),
+                "probability": None,
+                "status": None,
+            }
+        )
 
     for step in range(max_tool_calls + 1):
-        action, raw = generate_action(tokenizer, model, messages, max_new_tokens)
-        trace.append({"step": step, "model_raw": raw, "parsed": action})
+        active = [
+            index
+            for index, state in enumerate(states)
+            if state["probability"] is None
+        ]
+        if not active:
+            break
 
-        if not action:
-            messages.extend([
-                {"role": "assistant", "content": raw},
-                {
-                    "role": "user",
-                    "content": 'Invalid format. Output one JSON object only, e.g. {"type":"final","probability":0.5}',
-                },
-            ])
-            continue
-
-        if action.get("type") == "final":
-            try:
-                probability = float(action["probability"])
-            except (KeyError, TypeError, ValueError):
-                probability = math.nan
-            if math.isfinite(probability) and 0.0 <= probability <= 1.0:
-                return float(np.clip(probability, 1e-5, 1 - 1e-5)), trace, "ok"
-            messages.extend([
-                {"role": "assistant", "content": json.dumps(action)},
-                {
-                    "role": "user",
-                    "content": 'Invalid probability. Return {"type":"final","probability":<0..1>}.',
-                },
-            ])
-            continue
-
-        if action.get("type") != "tool":
-            messages.extend([
-                {"role": "assistant", "content": json.dumps(action)},
-                {"role": "user", "content": "type must be tool or final."},
-            ])
-            continue
-
-        name = str(action.get("name", ""))
-        arguments = action.get("arguments") or {}
-        if not isinstance(arguments, dict):
-            arguments = {}
-        if name == "similar_examples":
-            try:
-                arguments["k"] = int(np.clip(int(arguments.get("k", 12)), 4, 20))
-            except (TypeError, ValueError):
-                arguments["k"] = 12
-
-        if name in used_tools and name != "similar_examples":
-            result_payload = {"warning": f"{name} was already called; use its previous result or finish."}
-        else:
-            try:
-                result_payload = rag.call(name, query, **arguments).payload
-                used_tools.add(name)
-            except Exception as error:
-                result_payload = {"error": f"{type(error).__name__}: {error}"}
-
-        trace[-1].update(
-            tool_name=name,
-            tool_arguments=arguments,
-            tool_result=result_payload,
+        generated = generate_actions(
+            tokenizer,
+            model,
+            [states[index]["messages"] for index in active],
+            max_new_tokens,
         )
-        messages.extend([
-            {"role": "assistant", "content": json.dumps(action, ensure_ascii=False)},
-            {
-                "role": "user",
-                "content": "TOOL_RESULT\n"
-                + json.dumps(
-                    {"name": name, "result": result_payload},
-                    ensure_ascii=False,
-                    default=json_default,
-                    separators=(",", ":"),
-                ),
-            },
-        ])
 
-    return float(np.clip(prior, 1e-5, 1 - 1e-5)), trace, "fallback_prior"
+        for state_index, (action, raw) in zip(active, generated):
+            state = states[state_index]
+            query = state["query"]
+            messages = state["messages"]
+            trace = state["trace"]
+            used_tools = state["used_tools"]
+
+            trace_entry: dict[str, Any] = {
+                "step": step,
+                "model_raw": raw,
+                "parsed": action,
+            }
+            trace.append(trace_entry)
+
+            if not action:
+                messages.extend(
+                    [
+                        {"role": "assistant", "content": raw},
+                        {
+                            "role": "user",
+                            "content": (
+                                'Invalid format. Output one JSON object only, e.g. '
+                                '{"type":"final","probability":0.5}'
+                            ),
+                        },
+                    ]
+                )
+                continue
+
+            if action.get("type") == "final":
+                try:
+                    probability = float(action["probability"])
+                except (KeyError, TypeError, ValueError):
+                    probability = math.nan
+                if math.isfinite(probability) and 0.0 <= probability <= 1.0:
+                    state["probability"] = float(
+                        np.clip(probability, 1e-5, 1 - 1e-5)
+                    )
+                    state["status"] = "ok"
+                    continue
+
+                messages.extend(
+                    [
+                        {
+                            "role": "assistant",
+                            "content": json.dumps(action, ensure_ascii=False),
+                        },
+                        {
+                            "role": "user",
+                            "content": (
+                                'Invalid probability. Return '
+                                '{"type":"final","probability":<0..1>}.'
+                            ),
+                        },
+                    ]
+                )
+                continue
+
+            if action.get("type") != "tool":
+                messages.extend(
+                    [
+                        {
+                            "role": "assistant",
+                            "content": json.dumps(action, ensure_ascii=False),
+                        },
+                        {
+                            "role": "user",
+                            "content": "type must be tool or final.",
+                        },
+                    ]
+                )
+                continue
+
+            name, arguments = _tool_arguments(action)
+            if name in used_tools and name != "similar_examples":
+                result_payload = {
+                    "warning": (
+                        f"{name} was already called; "
+                        "use its previous result or finish."
+                    )
+                }
+            else:
+                try:
+                    result_payload = rag.call(name, query, **arguments).payload
+                    used_tools.add(name)
+                except Exception as error:
+                    result_payload = {
+                        "error": f"{type(error).__name__}: {error}"
+                    }
+
+            trace_entry.update(
+                tool_name=name,
+                tool_arguments=arguments,
+                tool_result=result_payload,
+            )
+            messages.extend(
+                [
+                    {
+                        "role": "assistant",
+                        "content": json.dumps(action, ensure_ascii=False),
+                    },
+                    {
+                        "role": "user",
+                        "content": "TOOL_RESULT\n"
+                        + json.dumps(
+                            {"name": name, "result": result_payload},
+                            ensure_ascii=False,
+                            default=json_default,
+                            separators=(",", ":"),
+                        ),
+                    },
+                ]
+            )
+
+    outcomes: list[tuple[float, list[dict[str, Any]], str]] = []
+    for state in states:
+        if state["probability"] is None:
+            probability = float(
+                np.clip(state["prior"], 1e-5, 1 - 1e-5)
+            )
+            status = "fallback_prior"
+        else:
+            probability = float(state["probability"])
+            status = str(state["status"])
+        outcomes.append((probability, state["trace"], status))
+    return outcomes
 
 
 def load_frames(args: argparse.Namespace) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -313,6 +469,7 @@ def brier(y: np.ndarray, p: np.ndarray) -> float:
 
 def main() -> None:
     args = parse_args()
+    validate_args(args)
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -323,9 +480,16 @@ def main() -> None:
 
     rag = TemporalTabularRAG(train, seed=args.seed)
     query_seasons = sorted(
-        {int(value) for value in pd.to_numeric(query["season"], errors="raise").tolist()}
+        {
+            int(value)
+            for value in pd.to_numeric(
+                query["season"], errors="raise"
+            ).tolist()
+        }
     )
-    prior_by_season = {season: rag.prior_rate(season) for season in query_seasons}
+    prior_by_season = {
+        season: rag.prior_rate(season) for season in query_seasons
+    }
     tokenizer, model, model_dir = load_model(args)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -338,62 +502,102 @@ def main() -> None:
         existing = pd.read_csv(prediction_path)
         done = len(existing)
         if done > len(query):
-            raise ValueError("resume file has more rows than current query slice")
+            raise ValueError(
+                "resume file has more rows than current query slice"
+            )
         rows.extend(existing.to_dict(orient="records"))
         print(f"[resume] {done:,} predictions")
 
+    print(
+        f"[batch] batch_size={args.batch_size}, "
+        f"rows={len(query):,}, max_tool_calls={args.max_tool_calls}"
+    )
+
     trace_mode = "a" if done and args.resume else "w"
+    newly_saved = 0
     with trace_path.open(trace_mode, encoding="utf-8") as trace_file:
-        for local_idx in tqdm(range(done, len(query)), desc="Qwen3-1.7B offline RAG"):
-            row = query.iloc[local_idx]
-            season = int(row["season"])
-            probability, trace, status = run_agent(
-                row,
+        batch_starts = range(done, len(query), args.batch_size)
+        progress = tqdm(
+            batch_starts,
+            total=math.ceil(max(len(query) - done, 0) / args.batch_size),
+            desc=f"Qwen3-1.7B offline RAG x{args.batch_size}",
+        )
+
+        for batch_start in progress:
+            batch_end = min(batch_start + args.batch_size, len(query))
+            local_indices = list(range(batch_start, batch_end))
+            query_rows = [query.iloc[index] for index in local_indices]
+            priors = [
+                prior_by_season[int(row["season"])]
+                for row in query_rows
+            ]
+
+            outcomes = run_agents_batch(
+                query_rows,
+                priors,
                 rag,
                 tokenizer,
                 model,
                 max_tool_calls=args.max_tool_calls,
                 max_new_tokens=args.max_new_tokens,
-                prior=prior_by_season[season],
             )
-            result: dict[str, Any] = {
-                "query_index": local_idx,
-                "source_index": int(row["source_index"]),
-                "row_id": row.get("row_id", local_idx),
-                "season": season,
-                "probability": probability,
-                "status": status,
-                "tool_calls": sum("tool_name" in item for item in trace),
-            }
-            if TARGET in row.index and not pd.isna(row[TARGET]):
-                result[TARGET] = float(row[TARGET])
-            rows.append(result)
 
-            trace_file.write(
-                json.dumps(
-                    {"result": result, "trace": trace},
-                    ensure_ascii=False,
-                    default=json_default,
+            for local_idx, row, (probability, trace, status) in zip(
+                local_indices, query_rows, outcomes
+            ):
+                season = int(row["season"])
+                result: dict[str, Any] = {
+                    "query_index": local_idx,
+                    "source_index": int(row["source_index"]),
+                    "row_id": row.get("row_id", local_idx),
+                    "season": season,
+                    "probability": probability,
+                    "status": status,
+                    "tool_calls": sum(
+                        "tool_name" in item for item in trace
+                    ),
+                }
+                if TARGET in row.index and not pd.isna(row[TARGET]):
+                    result[TARGET] = float(row[TARGET])
+                rows.append(result)
+
+                trace_file.write(
+                    json.dumps(
+                        {"result": result, "trace": trace},
+                        ensure_ascii=False,
+                        default=json_default,
+                    )
+                    + "\n"
                 )
-                + "\n"
-            )
+                newly_saved += 1
+
             trace_file.flush()
-
-            if (local_idx + 1) % 50 == 0 or local_idx + 1 == len(query):
+            if newly_saved >= args.save_every or batch_end == len(query):
                 pd.DataFrame(rows).to_csv(
-                    prediction_path, index=False, encoding="utf-8-sig"
+                    prediction_path,
+                    index=False,
+                    encoding="utf-8-sig",
                 )
+                newly_saved = 0
 
     predictions = pd.DataFrame(rows)
     summary: dict[str, Any] = {
         "model": "Qwen/Qwen3-1.7B",
         "model_dir": str(model_dir),
         "offline_inference": True,
+        "batched_generation": True,
+        "batch_size": args.batch_size,
         "rows": len(predictions),
         "mean_probability": float(predictions["probability"].mean()),
-        "std_probability": float(predictions["probability"].std(ddof=0)),
-        "fallback_rows": int(predictions["status"].ne("ok").sum()),
-        "mean_tool_calls": float(predictions["tool_calls"].mean()),
+        "std_probability": float(
+            predictions["probability"].std(ddof=0)
+        ),
+        "fallback_rows": int(
+            predictions["status"].ne("ok").sum()
+        ),
+        "mean_tool_calls": float(
+            predictions["tool_calls"].mean()
+        ),
         "prior_by_query_season": prior_by_season,
     }
     if TARGET in predictions.columns:
@@ -404,7 +608,8 @@ def main() -> None:
         slice_prior = float(np.mean(y[valid]))
         summary["slice_prior"] = slice_prior
         summary["slice_prior_brier"] = brier(
-            y[valid], np.full(valid.sum(), slice_prior)
+            y[valid],
+            np.full(valid.sum(), slice_prior),
         )
 
     (args.output_dir / "summary.json").write_text(
