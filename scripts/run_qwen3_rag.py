@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
-"""Qwen3-1.7B-only probabilistic forecaster with temporal-safe tabular RAG.
+"""Offline Qwen3-1.7B-only probabilistic forecaster with temporal-safe tabular RAG.
 
-The only learned model in this experiment is Qwen/Qwen3-1.7B.
+The only learned model in this experiment is a LOCAL copy of Qwen/Qwen3-1.7B.
 Python provides deterministic retrieval functions over historical train rows.
-Qwen decides which functions to call, reads their results, and emits a final
+Qwen decides which functions to call, reads their results, and emits the final
 control_success probability.
 
+Inference is intentionally network-disabled:
+- HF_HUB_OFFLINE=1
+- TRANSFORMERS_OFFLINE=1
+- local_files_only=True
+
 Recommended first run:
-    python scripts/run_qwen3_rag.py --query-season 2024 --limit 1000
+    python scripts/run_qwen3_rag.py --query-season 2024 --limit 100
 
 The script reports Brier score when labels are available and writes every model
 response/tool call for auditability.
@@ -18,11 +23,17 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import random
 import re
 import sys
 from pathlib import Path
 from typing import Any
+
+# Disable remote model access BEFORE importing transformers.
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 import numpy as np
 import pandas as pd
@@ -37,7 +48,7 @@ if str(SRC) not in sys.path:
 
 from qwen3_tabular_rag import TARGET, TemporalTabularRAG  # noqa: E402
 
-MODEL_NAME = "Qwen/Qwen3-1.7B"
+DEFAULT_MODEL_DIR = ROOT / "models" / "Qwen3-1.7B"
 DEFAULT_TRAIN = ROOT / "data" / "raw" / "train.csv"
 DEFAULT_OUTPUT = ROOT / "outputs" / "qwen3_1p7b_rag"
 
@@ -88,11 +99,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-tool-calls", type=int, default=4)
     parser.add_argument("--max-new-tokens", type=int, default=96)
-    parser.add_argument("--model", default=MODEL_NAME)
+    parser.add_argument(
+        "--model-dir",
+        type=Path,
+        default=DEFAULT_MODEL_DIR,
+        help="Local Qwen3-1.7B snapshot directory. Network access is never attempted.",
+    )
     parser.add_argument("--device", default="auto")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--trust-remote-code", action="store_true")
     return parser.parse_args()
 
 
@@ -129,22 +144,49 @@ def brier(y: np.ndarray, p: np.ndarray) -> float:
     return float(np.mean((p - y) ** 2))
 
 
+def validate_local_model_dir(model_dir: Path) -> Path:
+    model_dir = model_dir.expanduser().resolve()
+    if not model_dir.is_dir():
+        raise FileNotFoundError(
+            f"Local model directory does not exist: {model_dir}\n"
+            "Download Qwen3-1.7B beforehand with scripts/download_qwen3_1p7b.py "
+            "or copy a complete Hugging Face snapshot into this directory."
+        )
+    required_any = ["model.safetensors", "model.safetensors.index.json"]
+    if not (model_dir / "config.json").is_file():
+        raise FileNotFoundError(f"Missing config.json under {model_dir}")
+    if not any((model_dir / name).is_file() for name in required_any):
+        raise FileNotFoundError(
+            f"No model.safetensors or model.safetensors.index.json under {model_dir}"
+        )
+    tokenizer_markers = ["tokenizer.json", "tokenizer_config.json"]
+    if not any((model_dir / name).is_file() for name in tokenizer_markers):
+        raise FileNotFoundError(f"Tokenizer files are missing under {model_dir}")
+    return model_dir
+
+
 def load_model(args: argparse.Namespace):
+    model_dir = validate_local_model_dir(args.model_dir)
+    print(f"[offline model] {model_dir}")
+    print("[offline mode] HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 local_files_only=True")
+
     tokenizer = AutoTokenizer.from_pretrained(
-        args.model,
-        trust_remote_code=args.trust_remote_code,
+        str(model_dir),
+        local_files_only=True,
+        trust_remote_code=False,
     )
     kwargs: dict[str, Any] = {
         "torch_dtype": "auto",
-        "trust_remote_code": args.trust_remote_code,
+        "local_files_only": True,
+        "trust_remote_code": False,
     }
     if args.device == "auto":
         kwargs["device_map"] = "auto"
-    model = AutoModelForCausalLM.from_pretrained(args.model, **kwargs)
+    model = AutoModelForCausalLM.from_pretrained(str(model_dir), **kwargs)
     if args.device != "auto":
         model = model.to(torch.device(args.device))
     model.eval()
-    return tokenizer, model
+    return tokenizer, model, model_dir
 
 
 def model_device(model: Any) -> torch.device:
@@ -213,18 +255,13 @@ def run_agent(
         {"role": "user", "content": query_message(rag.query_snapshot(query))},
     ]
     trace: list[dict[str, Any]] = []
-    last_raw = ""
     used_tools: set[str] = set()
 
     for step in range(max_tool_calls + 1):
         action, raw = generate_json(tokenizer, model, messages, max_new_tokens)
-        last_raw = raw
         trace.append({"step": step, "model_raw": raw, "parsed": action})
         if not action:
-            messages.append({
-                "role": "assistant",
-                "content": raw,
-            })
+            messages.append({"role": "assistant", "content": raw})
             messages.append({
                 "role": "user",
                 "content": 'Invalid format. Output one JSON object only. Example: {"type":"final","probability":0.5}',
@@ -256,6 +293,7 @@ def run_agent(
             arguments = {}
         if name == "similar_examples":
             arguments["k"] = int(np.clip(int(arguments.get("k", 12)), 4, 20))
+
         if name in used_tools and name != "similar_examples":
             result_payload = {"warning": f"{name} was already called; use existing result or finish."}
         else:
@@ -280,8 +318,8 @@ def run_agent(
             ),
         })
 
-    # A malformed generation must not destroy an entire experiment. The fallback
-    # is the historical pre-query-season prior and is explicitly flagged.
+    # Invalid generations must not destroy a long experiment. The fallback is
+    # the historical pre-query-season prior and is explicitly flagged.
     return float(np.clip(prior, 1e-5, 1 - 1e-5)), trace, "fallback_prior"
 
 
@@ -317,7 +355,7 @@ def main() -> None:
 
     train, query = load_frames(args)
     rag = TemporalTabularRAG(train, seed=args.seed)
-    tokenizer, model = load_model(args)
+    tokenizer, model, model_dir = load_model(args)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     prediction_path = args.output_dir / "predictions.csv"
@@ -338,7 +376,7 @@ def main() -> None:
 
     trace_mode = "a" if done and args.resume else "w"
     with trace_path.open(trace_mode, encoding="utf-8") as trace_file:
-        for local_idx in tqdm(range(done, len(query)), desc="Qwen3-1.7B RAG"):
+        for local_idx in tqdm(range(done, len(query)), desc="Qwen3-1.7B offline RAG"):
             row = query.iloc[local_idx]
             season = int(row["season"])
             prior = fallback_prior(train, season)
@@ -370,13 +408,14 @@ def main() -> None:
             ) + "\n")
             trace_file.flush()
 
-            # Keep progress recoverable without waiting for the whole run.
             if (local_idx + 1) % 50 == 0 or local_idx + 1 == len(query):
                 pd.DataFrame(rows).to_csv(prediction_path, index=False, encoding="utf-8-sig")
 
     predictions = pd.DataFrame(rows)
     summary: dict[str, Any] = {
-        "model": args.model,
+        "model": "Qwen/Qwen3-1.7B",
+        "model_dir": str(model_dir),
+        "offline_inference": True,
         "rows": len(predictions),
         "mean_probability": float(predictions["probability"].mean()),
         "std_probability": float(predictions["probability"].std(ddof=0)),
