@@ -5,6 +5,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 
@@ -17,9 +18,9 @@ def main() -> None:
     src = Path(args.input_zip).resolve()
     if not src.is_file():
         raise FileNotFoundError(src)
-    dst = Path(args.output).resolve() if args.output else src.with_name(src.stem + "_pandas_pinned.zip")
+    dst = Path(args.output).resolve() if args.output else src.with_name(src.stem + "_numpy_pandas_pinned.zip")
 
-    with tempfile.TemporaryDirectory(prefix="aimers_pin_pandas_") as td:
+    with tempfile.TemporaryDirectory(prefix="aimers_pin_numpy_pandas_") as td:
         root = Path(td)
         with zipfile.ZipFile(src) as zf:
             zf.extractall(root)
@@ -31,7 +32,12 @@ def main() -> None:
             raise RuntimeError("invalid submission ZIP structure")
 
         lines = [x.strip() for x in req.read_text(encoding="utf-8").splitlines() if x.strip()]
-        lines = [x for x in lines if not x.lower().startswith("pandas==")]
+        lines = [
+            x for x in lines
+            if not x.lower().startswith("pandas==")
+            and not x.lower().startswith("numpy==")
+        ]
+        lines.append(f"numpy=={np.__version__}")
         lines.append(f"pandas=={pd.__version__}")
         req.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -42,6 +48,7 @@ def main() -> None:
                 if path.is_file():
                     zf.write(path, path.relative_to(root).as_posix())
 
+    print(f"numpy={np.__version__}")
     print(f"pandas={pd.__version__}")
     print(f"repaired={dst}")
 
