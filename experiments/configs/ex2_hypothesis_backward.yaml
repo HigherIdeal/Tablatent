@@ -1,0 +1,50 @@
+experiment: ex2_hypothesis_backward
+baseline_config: configs/baseline_safe_981.yaml
+
+output_dir: outputs/experiments/ex2/hypothesis_backward
+model_dir: models/ex2
+pitcher_col: pitcher_id
+
+# EX2 is intentionally independent from SAFE982 predictions.
+# The model is trained as: (current pre-pitch X, true y) -> previous-season pitcher state.
+# At evaluation, y=0 and y=1 are both hypothesized and scored only by backward
+# reconstruction consistency with the known previous-season state.
+variants:
+  - context_only
+  - history_no_id
+  - history_plus_id
+
+# We first test the regime where EX1 showed a reasonably stable backward state.
+# This threshold is on the previous season only; current rows are not filtered by
+# current-season pitch count.
+min_past_pitch_count: 200
+
+fold_seasons:
+  - 2022
+  - 2023
+  - 2024
+
+# Temperature for the energy margin is selected only from earlier held-out folds.
+# 2022 therefore uses T=1; 2023 can calibrate from 2022; 2024 from 2022+2023.
+temperature_grid:
+  - 0.125
+  - 0.25
+  - 0.5
+  - 1.0
+  - 2.0
+  - 4.0
+  - 8.0
+  - 16.0
+
+energy_sigma_floor: 0.01
+independence_audit_rows: 8
+
+catboost:
+  iterations: 300
+  learning_rate: 0.04
+  depth: 6
+  l2_leaf_reg: 12.0
+  random_strength: 0.5
+  bootstrap_type: Bayesian
+  bagging_temperature: 0.5
+  random_seed: 42
