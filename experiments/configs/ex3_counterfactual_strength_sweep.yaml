@@ -1,0 +1,64 @@
+experiment: ex3_counterfactual_strength_sweep
+baseline_config: configs/baseline_safe_981.yaml
+
+output_dir: outputs/experiments/ex3/counterfactual_strength_sweep
+model_dir: models/ex3
+pitcher_col: pitcher_id
+
+# Diagnostic only: test whether EX3 collapsed because the one-pitch perturbation
+# was too small relative to backward reconstruction noise.
+# The backward model is trained once per fold on the realized one-pitch state (w=1).
+# Evaluation then reuses that exact model while changing only the hypothetical
+# pseudo-count strength. This isolates counterfactual scale from model capacity.
+variants:
+  - state_only
+  - context_state
+
+fold_seasons:
+  - 2022
+  - 2023
+  - 2024
+
+min_past_pitch_count: 200
+
+# Hard-state pseudo-count strengths to probe.
+# lambda=1 exactly reproduces the original EX3 hard-event scale.
+hard_event_strengths:
+  - 1.0
+  - 5.0
+  - 20.0
+  - 50.0
+  - 100.0
+
+# Soft states use this fraction of the corresponding hard strength.
+# Thus lambda=20 gives hard=20 and soft=7 pseudo-observations.
+soft_to_hard_ratio: 0.35
+
+failure_middle_prior_floor: 0.02
+failure_middle_prior_ceiling: 0.98
+substate_temperature: 1.0
+
+# Probability temperature is calibrated separately for each lambda using only
+# earlier held-out folds. AUC is temperature invariant and is the primary probe.
+temperature_grid:
+  - 0.125
+  - 0.25
+  - 0.5
+  - 1.0
+  - 2.0
+  - 4.0
+  - 8.0
+  - 16.0
+
+energy_sigma_floor: 0.01
+independence_audit_rows: 8
+
+catboost:
+  iterations: 350
+  learning_rate: 0.04
+  depth: 6
+  l2_leaf_reg: 12.0
+  random_strength: 0.5
+  bootstrap_type: Bayesian
+  bagging_temperature: 0.5
+  random_seed: 42
