@@ -191,6 +191,7 @@ def _catboost_params(cfg: dict[str, Any], *, loss_kind: str) -> dict[str, Any]:
         "random_seed": int(cfg.get("seed", 42)),
         "task_type": "GPU",
         "devices": "0",
+        "gpu_ram_part": float(cfg.get("gpu_ram_part", 0.82)),
         "allow_writing_files": False,
         "logging_level": "Silent",
     }
@@ -250,12 +251,10 @@ def _initial_trials(exp: dict[str, Any]) -> list[dict[str, Any]]:
     for r in range(0, len(STABLE_POOL) + 1):
         for subset in itertools.combinations(STABLE_POOL, r):
             trait_sets.append(("success", *subset))
-    # Negative controls are deliberately sparse rather than multiplying the full grid.
     trait_sets += [("success", "middle"), ("success", "ball", "middle")]
     modes = [str(x) for x in exp.get("history_modes", ["prev", "recent2", "career"])]
     ks = [float(x) for x in exp.get("reliability_grid", [50, 100, 200, 500, 1000])]
 
-    # Phase A: isolate trait/profile/reliability effects quickly.
     for traits in trait_sets:
         for mode in modes:
             for k in ks:
@@ -277,7 +276,6 @@ def _initial_trials(exp: dict[str, Any]) -> list[dict[str, Any]]:
                     }
                 )
 
-    # Phase B: structurally richer probes centered on the EX4 stable set.
     rich_trait_sets = [
         ["success", "ball"],
         ["success", "strike"],
@@ -362,7 +360,6 @@ def _top_configs(trials_path: Path, n: int = 12) -> list[dict[str, Any]]:
         cfg = row.get("config")
         if not isinstance(cfg, dict):
             continue
-        # Keep structural diversity; seed/capacity differences do not define a family.
         family = {
             k: cfg.get(k)
             for k in (
@@ -410,15 +407,14 @@ def _write_leaderboard(output_dir: Path, limit: int = 25) -> None:
 
 
 def run(config_path: str | Path, *, hours: float, expected_gpu: int = 2) -> dict[str, Any]:
-    # GPU isolation must be set before CatBoost is imported by a trial.
     from bitaboost.night.common import ensure_worker_gpu
 
     ensure_worker_gpu(expected_gpu)
     exp = load_yaml(config_path)
     worker_cfg = dict(exp.get("gpu2", {}))
-    output_dir = resolve_path(worker_cfg.get("output_dir", "outputs/night_20260818/gpu2"))
+    output_dir = resolve_path(worker_cfg.get("output_dir", "outputs/night_20260819/gpu2"))
     output_dir.mkdir(parents=True, exist_ok=True)
-    timer = CampaignTimer(hours=hours, reserve_minutes=float(exp.get("reserve_minutes", 20)))
+    timer = CampaignTimer(hours=hours, reserve_minutes=float(exp.get("reserve_minutes", 10)))
     recorder = TrialRecorder(
         output_dir,
         worker="gpu2_structure",
@@ -441,6 +437,7 @@ def run(config_path: str | Path, *, hours: float, expected_gpu: int = 2) -> dict
             "hours": float(hours),
             "physical_gpu": int(expected_gpu),
             "logical_device": 0,
+            "gpu_ram_part": 0.82,
             "rows": int(len(frame)),
             "prepare_seconds": prepare_seconds,
             "safe_contract": "all evaluation-row features are row-local or frozen from seasons before the row season",
@@ -557,7 +554,6 @@ def run(config_path: str | Path, *, hours: float, expected_gpu: int = 2) -> dict
             ]
         queue = _refinement_trials(best_cfgs, refinement_round)
         refinement_round += 1
-        # Avoid a tight loop if every generated config has already been seen.
         if all(_config_key(cfg) in seen for cfg in queue):
             for cfg in queue:
                 cfg["seed"] = int(cfg.get("seed", 42)) + 1009 * refinement_round
