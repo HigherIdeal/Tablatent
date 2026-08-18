@@ -1,0 +1,53 @@
+experiment: ex1_backward_suite
+baseline_config: configs/baseline_safe_981.yaml
+
+output_dir: outputs/experiments/ex1/backward_suite
+model_dir: models/ex1/backward_suite
+pitcher_col: pitcher_id
+
+# This suite is a pure historical diagnostic. It never loads SAFE predictions and
+# never blends with the forward competition model.
+variants:
+  - state_only
+  - state_plus_id
+primary_variant: state_only
+
+fold_seasons:
+  - 2022
+  - 2023
+  - 2024
+
+# Stage 1/2: robustness against noisy short seasons.
+min_pitch_thresholds:
+  - 50
+  - 200
+  - 500
+
+# Stage 3: cumulative career entering the current season.
+career_groups:
+  - name: very_low
+    min: 0
+    max: 199
+  - name: developing
+    min: 200
+    max: 999
+  - name: established
+    min: 1000
+    max: 2999
+  - name: veteran
+    min: 3000
+    max: null
+career_min_season_pitches: 50
+
+# Stage 4 uses the more reliable season-state regime found in EX1-B.
+symmetry_min_season_pitches: 200
+
+catboost:
+  iterations: 400
+  learning_rate: 0.03
+  depth: 4
+  l2_leaf_reg: 10.0
+  random_strength: 0.5
+  bootstrap_type: Bayesian
+  bagging_temperature: 0.5
+  random_seed: 42
