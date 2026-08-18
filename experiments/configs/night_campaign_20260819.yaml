@@ -9,7 +9,7 @@ fold_seasons:
   - 2023
   - 2024
 stability_penalty: 0.25
-reserve_minutes: 20
+reserve_minutes: 10
 
 # Frozen history families. Every row from season s uses only source seasons < s.
 history_modes:
