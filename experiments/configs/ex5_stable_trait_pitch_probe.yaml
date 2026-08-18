@@ -1,0 +1,48 @@
+experiment: ex5_stable_trait_pitch_probe
+baseline_config: configs/baseline_safe_981.yaml
+
+output_dir: outputs/experiments/ex5/stable_trait_pitch_probe
+model_dir: models/ex5
+pitcher_col: pitcher_id
+
+# EX4 direction-invariant subset. Middle is retained only as a negative-control variant.
+stable_traits:
+  - ball
+  - reverse
+  - success
+  - strike
+negative_control_trait: middle
+
+# For a pitch in season s, EX5 uses only the same pitcher's frozen profile from s-1.
+# No current-season target aggregates are used as features.
+fold_seasons:
+  - 2022
+  - 2023
+  - 2024
+
+variants:
+  - prior_success_only
+  - stable4_raw
+  - stable4_reliable
+  - stable4_reliable_plus_middle
+
+# Empirical-Bayes style reliability of the previous-season state.
+reliability_k: 200.0
+
+# Diagnostics by frozen previous-season sample size.
+experience_bins:
+  - 50
+  - 200
+  - 500
+
+independence_audit_rows: 8
+
+catboost:
+  iterations: 300
+  learning_rate: 0.04
+  depth: 4
+  l2_leaf_reg: 12.0
+  random_strength: 0.5
+  bootstrap_type: Bayesian
+  bagging_temperature: 0.5
+  random_seed: 42
