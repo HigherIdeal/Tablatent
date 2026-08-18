@@ -20,7 +20,11 @@ def metadata(path: Path) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Reproduce the frozen rule-safe Codex baseline.")
-    ap.add_argument("--gpus", default="all")
+    ap.add_argument(
+        "--gpus",
+        default="2",
+        help="Physical GPU id. Default=2 (single RTX 4090 on iclab4GPU).",
+    )
     ap.add_argument("--output", default="dist/baseline_SAFE.zip")
     ap.add_argument("--tolerance", type=float, default=1.5e-4)
     ap.add_argument("--smoke", action="store_true", help="Also run final package inference smoke test on data/test.csv.")
