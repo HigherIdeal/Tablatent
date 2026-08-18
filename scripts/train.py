@@ -12,7 +12,11 @@ def main() -> None:
     ap = argparse.ArgumentParser(
         description="Bitaboost training entry point. The initial implementation is the frozen safe baseline."
     )
-    ap.add_argument("--gpus", default="all")
+    ap.add_argument(
+        "--gpus",
+        default="2",
+        help="Physical GPU id. Default=2 (single RTX 4090 on iclab4GPU).",
+    )
     ap.add_argument("--output", default="dist/train_latest.zip")
     ap.add_argument("--smoke", action="store_true")
     args = ap.parse_args()
