@@ -14,7 +14,7 @@ from bitaboost.night.gpu3_calibration import run
 def main() -> None:
     parser = argparse.ArgumentParser(description="Overnight GPU3 rolling-OOF calibration / stacking search")
     parser.add_argument("--config", default="experiments/configs/night_campaign_20260819.yaml")
-    parser.add_argument("--hours", type=float, default=7.67)
+    parser.add_argument("--hours", type=float, default=8.0)
     parser.add_argument("--gpu", type=int, default=3)
     args = parser.parse_args()
     result = run(args.config, hours=args.hours, expected_gpu=args.gpu)
