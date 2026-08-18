@@ -9,7 +9,14 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from bitaboost.ex1.reverse_expert import run
+from bitaboost.ex1 import reverse_expert as reverse_core
+from bitaboost.ex1.frozen_baseline import load_frozen_baseline
+
+# Historical SAFE predictions.npz contains game_type as an object array.  Keep
+# allow_pickle=False and replace only the EX1 frozen-baseline loader; the forward
+# predictor itself remains completely frozen and is never retrained here.
+reverse_core._load_frozen_baseline = load_frozen_baseline
+run = reverse_core.run
 
 
 def main() -> None:
