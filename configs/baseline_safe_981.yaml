@@ -11,6 +11,7 @@ data:
   validation_season: 2024
 
 runtime:
+  # One RTX 4090 only: physical GPU 2 is exposed as CatBoost logical device 0.
   physical_gpu: "2"
   catboost_device: "0"
   gpu_ram_part: 0.92
@@ -46,7 +47,6 @@ recipe:
     conditional_loss: logloss
     conditional_tree: 400
     f_weight: 1.0
-    reuse_conditional: true
   mixed:
     interaction_c: -1.2
     independent_gate_weight: 0.4
@@ -59,7 +59,6 @@ recipe:
     feature_version: cross1
     prior: recent
     tree: 400
-    old_f_weight: 1.0
   joint:
     tree: 600
     f_weight: 2.0
@@ -83,8 +82,28 @@ output:
   save_components: true
 
 reference:
+  # Read-only forensic oracle. Training does not require this directory and never
+  # reads these predictions as labels/features. If the sibling Tablatent workspace is
+  # present, baseline_train prints vector deltas automatically after fitting.
+  artifact_root: ../Tablatent/outputs
+  audit_if_available: true
   mixed_brier: 0.24738012841754628
   safe_core_brier: 0.247355195959
   final_brier: 0.247355098397
   final_score: 981.4893
   brier_tolerance: 0.000005
+
+provenance:
+  # Unreachable Git object snapshot that contains current_best_safe_2024_predictions.npz.
+  root_tree: 31ebebad99d9675875897f74c1de41af723e7104
+  scripts_tree: 05f4136e92c86cc0785078f0a7a1e842806b91bb
+  safe_prediction_blob: a1653b24fcc137526cc90879e327698d81d71000
+  recovered_scripts:
+    run_aux_head_classifiers.py: 0af96a00ce41aec32c7351f254ed57e553e0932a
+    run_frozen_domain_path_probe.py: a4db24c2d3eb84f0ae45ba61288907cc0d705a69
+    run_game_type_temporal_regime_ablation.py: d20f77730f785531ffda03b8b82fd466258f8913
+    run_multitask_outcome_boosting.py: 8a6631c80e9afa2ba6c3ba5c8f2d8f1beffe48d5
+    run_offset_residual_boosting.py: af75dac768a3153256cd5d83a01a7d9e256e6d2c
+    run_regime_feature_prediction_suite.py: 1102cee3ec3bdddb5034f5bbab4e0664389dbd21
+    run_structured_outcome_multiclass.py: 417da7b5cf0a5f59e4b0664fed78ec6002591fbf
+    run_success_hurdle_boosting.py: f2bea07817f1f84252db3f847383de08f38e3327

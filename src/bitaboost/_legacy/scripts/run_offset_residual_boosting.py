@@ -32,6 +32,21 @@ def add_anchor_cross(f):
   long=f[f'asof_pitcher_{short}_rate'].to_numpy(float);state=np.nan_to_num(f[f'eng_since_anchor_{short}_rate'].to_numpy(float),nan=long);name=f'eng_anchor_pitch_{short}_shrunk';f[name]=(pg*state+100*long)/(pg+100);shrunk[short]=f[name].to_numpy(float);out.append(name)
  f['eng_anchor_valid_proxy']=(1-shrunk['reverse'])*(1-shrunk['middle']);out.append('eng_anchor_valid_proxy');return out
 
+def add_rowlocal_season_basis(f):
+ out=[];n=f.asof_pitcher_n.to_numpy(float);gap=f.eng_anchor_gap_n.to_numpy(float);an=n-gap
+ rates={}
+ for short in ('success','reverse','middle','ball','strike'):
+  cur=f[f'asof_pitcher_{short}_rate'].to_numpy(float);anchor=f[f'eng_anchor_{short}_rate'].to_numpy(float)
+  count=np.rint(n*cur)-np.rint(an*anchor);valid=np.isfinite(gap)&(gap>0)&np.isfinite(count)&(count>=0)&(count<=gap);count=np.where(valid,count,np.nan)
+  for name,val in [(f'eng_season_{short}_count',count),(f'eng_season_{short}_fail_count',gap-count)]:f[name]=val.astype(np.float32);out.append(name)
+  rate=np.divide(count,gap,out=np.full(len(f),np.nan),where=valid);rates[short]=rate
+  for k in (10.,30.,100.,300.):
+   name=f'eng_season_{short}_eb{int(k)}';f[name]=((np.nan_to_num(count,nan=0)+k*cur)/(np.nan_to_num(gap,nan=0)+k)).astype(np.float32);out.append(name)
+ f['eng_season_log_support']=np.log1p(np.nan_to_num(gap,nan=0)).astype(np.float32);out.append('eng_season_log_support')
+ f['eng_season_valid_proxy']=((1-rates['reverse'])*(1-rates['middle'])).astype(np.float32);out.append('eng_season_valid_proxy')
+ p=np.column_stack([rates[x] for x in ('reverse','middle','ball','strike')]);p=np.clip(p,1e-6,1);f['eng_season_aux_entropy']=(-np.nansum(p*np.log(p),axis=1)).astype(np.float32);out.append('eng_season_aux_entropy')
+ return out
+
 def add_frozen_matchup(f):
  specs={'p_hand':(['pitcher_id','batter_hand'],'asof_pitcher_success_rate'),'b_hand':(['batter_id','pitcher_hand'],'asof_batter_success_rate'),'p_hand_gt':(['pitcher_id','batter_hand','game_type'],'asof_pitcher_success_rate'),'b_hand_gt':(['batter_id','pitcher_hand','game_type'],'asof_batter_success_rate')};out=[];states={k:None for k in specs}
  for name in specs:
@@ -68,6 +83,27 @@ def add_frozen_pressure_profiles(f):
    state=states[name]
    if state is not None:
     hit=state.reindex(pd.MultiIndex.from_frame(part[keys]));n=hit['n'].to_numpy(float);sm=(hit['sum'].to_numpy(float)+100*part[basecol].to_numpy(float))/(n+100);f.loc[idx,f'eng_{name}_logn']=np.log1p(n);f.loc[idx,f'eng_{name}_rate']=sm;f.loc[idx,f'eng_{name}_delta']=sm-part[basecol].to_numpy(float)
+   now=part.groupby(keys,dropna=False).control_success.agg(['size','sum']).rename(columns={'size':'n'});states[name]=now if state is None else pd.concat([state,now]).groupby(level=list(range(len(keys)))).sum()
+ return out
+
+def add_frozen_context_lattice(f):
+ specs={
+  'p_chg':(['pitcher_id','balls_before','strikes_before','batter_hand','game_type'],'asof_pitcher_success_rate'),
+  'b_chg':(['batter_id','balls_before','strikes_before','pitcher_hand','game_type'],'asof_batter_success_rate'),
+  'p_cb':(['pitcher_id','balls_before','strikes_before','base_state'],'asof_pitcher_success_rate'),
+  'b_cb':(['batter_id','balls_before','strikes_before','base_state'],'asof_batter_success_rate'),
+  'p_ih':(['pitcher_id','inning','batter_hand'],'asof_pitcher_success_rate'),
+  'b_ih':(['batter_id','inning','pitcher_hand'],'asof_batter_success_rate')}
+ out=[];states={k:None for k in specs}
+ for name in specs:
+  for suffix in ('logn','rate','delta'):
+   c=f'eng_{name}_{suffix}';f[c]=np.nan;out.append(c)
+ for season in sorted(f.season.unique()):
+  idx=f.index[f.season.eq(season)];part=f.loc[idx]
+  for name,(keys,basecol) in specs.items():
+   state=states[name]
+   if state is not None:
+    hit=state.reindex(pd.MultiIndex.from_frame(part[keys]));n=hit['n'].to_numpy(float);base=part[basecol].to_numpy(float);sm=(hit['sum'].to_numpy(float)+50*base)/(n+50);f.loc[idx,f'eng_{name}_logn']=np.log1p(n);f.loc[idx,f'eng_{name}_rate']=sm;f.loc[idx,f'eng_{name}_delta']=sm-base
    now=part.groupby(keys,dropna=False).control_success.agg(['size','sum']).rename(columns={'size':'n'});states[name]=now if state is None else pd.concat([state,now]).groupby(level=list(range(len(keys)))).sum()
  return out
 
