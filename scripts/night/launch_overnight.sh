@@ -33,6 +33,29 @@ if command -v nvidia-smi >/dev/null 2>&1; then
   nvidia-smi -i 2,3 --query-gpu=index,name,memory.used,memory.total --format=csv,noheader || true
 fi
 
+# A one-tree synthetic fit catches CUDA/CatBoost device problems before the terminal
+# is detached. It is not part of the research results.
+for GPU in 2 3; do
+  CUDA_VISIBLE_DEVICES="$GPU" python - <<'PY'
+import numpy as np
+from catboost import CatBoostClassifier
+rng = np.random.default_rng(0)
+x = rng.normal(size=(512, 4)).astype(np.float32)
+y = (x[:, 0] + 0.2 * x[:, 1] > 0).astype(np.int8)
+model = CatBoostClassifier(
+    iterations=1,
+    depth=2,
+    loss_function="Logloss",
+    task_type="GPU",
+    devices="0",
+    allow_writing_files=False,
+    logging_level="Silent",
+)
+model.fit(x, y)
+print("[preflight] CatBoost GPU synthetic fit passed", flush=True)
+PY
+done
+
 if [[ -f "$OUT/gpu2/pid" ]] && kill -0 "$(cat "$OUT/gpu2/pid")" 2>/dev/null; then
   echo "GPU2 worker already running: PID $(cat "$OUT/gpu2/pid")"
   exit 1
@@ -62,8 +85,24 @@ nohup env PYTHONUNBUFFERED=1 \
 WATCH_PID=$!
 echo "$WATCH_PID" > "$OUT/summary_watcher.pid"
 
+# Give immediate startup failures a chance to surface before the user closes the shell.
+sleep 12
+FAILED=0
+for ITEM in "gpu2:$GPU2_PID" "gpu3:$GPU3_PID"; do
+  NAME="${ITEM%%:*}"
+  PID="${ITEM##*:}"
+  if ! kill -0 "$PID" 2>/dev/null; then
+    echo "ERROR: $NAME worker exited during startup. Last log lines:"
+    tail -n 80 "$OUT/$NAME/worker.log" || true
+    FAILED=1
+  fi
+done
+if [[ "$FAILED" -ne 0 ]]; then
+  exit 1
+fi
+
 cat <<EOF
-Overnight campaign launched.
+Overnight campaign launched and startup-checked.
   GPU2 structure     PID=$GPU2_PID  log=$OUT/gpu2/worker.log
   GPU3 calibration   PID=$GPU3_PID  log=$OUT/gpu3/worker.log
   summary watcher    PID=$WATCH_PID log=$OUT/summary_watcher.log
