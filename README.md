@@ -41,61 +41,90 @@ Bitaboost/
 
 ## 1. Environment
 
-The current server already has Conda environments under `~/.conda/envs/`. A convenient clean environment is a clone of `test_trial`:
+Reference data/runtime versions are pinned:
+
+```text
+Python      3.11
+NumPy       1.26.4
+pandas      2.2.3
+PyArrow     17.0.0
+CatBoost    1.2.10
+```
+
+Existing environment:
 
 ```bash
 cd ~/Aimers/Bitaboost
-conda create -n bitaboost --clone test_trial
 conda activate bitaboost
-python -m pip install --upgrade pip
-pip install -r requirements.txt
+python -m pip install --upgrade -r requirements.txt
 ```
 
-Check the selected GPU:
+Verify:
 
 ```bash
-nvidia-smi -i 2
+python - <<'PY'
+import numpy, pandas, pyarrow, catboost
+print('numpy   ', numpy.__version__)
+print('pandas  ', pandas.__version__)
+print('pyarrow ', pyarrow.__version__)
+print('catboost', catboost.__version__)
+PY
 ```
+
+Expected NumPy version is exactly `1.26.4`.
 
 ### GPU policy
 
-The project uses **one RTX 4090 only: physical GPU 2**.
+The project uses **one RTX 4090 only: physical GPU 2**. The point is to use the large VRAM of one 4090, not multi-GPU training.
 
-`GPU가 빵빵하다` means the selected 4090 has enough VRAM, not that training should span multiple GPUs. Keep the model on one GPU and use its VRAM aggressively. The wrappers therefore default to physical GPU `2`.
-
-Normal command:
+Recommended shell setting:
 
 ```bash
-python scripts/baseline_train.py --gpus 2
+echo 'export CUDA_VISIBLE_DEVICES=2' >> ~/.bashrc
+source ~/.bashrc
 ```
 
-Equivalent explicit isolation:
+After that physical GPU 2 appears to CUDA programs as logical GPU `0`.
 
-```bash
-CUDA_VISIBLE_DEVICES=2 python scripts/baseline_train.py --gpus 0
+The Bitaboost wrappers also default to physical GPU 2, so the normal baseline command needs no GPU option.
+
+## 2. Data cache: Parquet only
+
+Bitaboost does **not** read `train.pkl`. Pickle caches are intentionally ignored because NumPy/Pandas module paths can change across versions (`numpy._core.numeric` vs `numpy.core.numeric`).
+
+Processed training data is:
+
+```text
+data/processed/train.parquet
 ```
 
-Do **not** use `--gpus all` for the normal Bitaboost workflow.
+Format:
 
-## 2. Data
+```text
+Parquet + PyArrow + Zstandard
+```
 
-Reuse the existing prepared dataset:
+If reusing the old data directory:
 
 ```bash
 cd ~/Aimers/Bitaboost
 ln -s /home/kjw/Aimers/Tablatent_backup/data data
 ```
 
-Expected cache:
+If `data` already exists, do not recreate the symlink.
 
-```text
-data/processed/train.pkl
-```
-
-If the cache does not exist:
+### Build the Parquet cache
 
 ```bash
 python scripts/prepare_data.py
+```
+
+The script first reuses an already extracted `train.csv` when possible. If unavailable, it downloads/extracts the official dataset. An old `train.pkl` may remain on disk but is ignored.
+
+Force a full rebuild only when necessary:
+
+```bash
+python scripts/prepare_data.py --force
 ```
 
 Sanity check:
@@ -103,7 +132,7 @@ Sanity check:
 ```bash
 python - <<'PY'
 import pandas as pd
-x = pd.read_pickle('data/processed/train.pkl')
+x = pd.read_parquet('data/processed/train.parquet')
 print(x.shape)
 print(x.groupby('season')['control_success'].agg(['size','mean']))
 PY
@@ -113,21 +142,21 @@ Expected total rows are approximately `1,475,092`, covering seasons `2019..2024`
 
 ## 3. Reproduce the safe Codex maximum
 
-This is the first command to run after a clean setup:
+After `train.parquet` exists:
 
 ```bash
-python scripts/baseline_train.py --gpus 2
+python scripts/baseline_train.py
 ```
 
 The command:
 
-1. loads the official 2019-2024 training data;
+1. loads the official 2019-2024 Parquet cache;
 2. builds the frozen rule-safe feature/profile set;
-3. trains the decomposed CatBoost ensemble on GPU 2;
+3. trains the decomposed CatBoost ensemble on the single RTX 4090;
 4. evaluates the 2024 validation fold;
 5. refits on 2019-2024;
 6. creates `dist/baseline_SAFE.zip`;
-7. compares the reproduced metric with the reference `0.247355098`.
+7. compares the reproduced metric with `0.247355098`.
 
 Expected check:
 
@@ -137,7 +166,7 @@ reproduced score ≈ 981.5
 BASELINE_OK
 ```
 
-The exact reference is allowed a small tolerance because GPU CatBoost can exhibit tiny numerical variation.
+Tiny GPU CatBoost numerical variation is allowed by the checker tolerance.
 
 Inspect the package without retraining:
 
@@ -145,17 +174,16 @@ Inspect the package without retraining:
 python scripts/eval.py --zip dist/baseline_SAFE.zip
 ```
 
-If `data/test.csv` and `data/sample_submission.csv` are present, also run the final packaged inference smoke test:
+If `data/test.csv` and `data/sample_submission.csv` are present, run the final packaged inference smoke test:
 
 ```bash
-python scripts/baseline_train.py --gpus 2 --smoke
+python scripts/baseline_train.py --smoke
 ```
 
 ## 4. Build the current-best submission directly
 
 ```bash
 python scripts/build_current_best_submission.py \
-  --gpus 2 \
   --output dist/current_best_SAFE.zip
 ```
 
@@ -163,7 +191,6 @@ Skip the final test-file smoke check when only retraining/package generation is 
 
 ```bash
 python scripts/build_current_best_submission.py \
-  --gpus 2 \
   --output dist/current_best_SAFE.zip \
   --skip-smoke
 ```
@@ -183,7 +210,7 @@ joint auxiliary outcome
 R/F-specific convex ensemble
 ```
 
-The final ZIP is converted to the portable `csv.gz` history format and uses the optimized inference package.
+The final ZIP uses portable `csv.gz` history artifacts; no pickle history remains in the final submission package.
 
 ## 5. New experiments
 
@@ -192,7 +219,7 @@ The final ZIP is converted to the portable `csv.gz` history format and uses the 
 Use:
 
 ```bash
-python scripts/train.py --gpus 2 --output dist/train_latest.zip
+python scripts/train.py --output dist/train_latest.zip
 ```
 
 At this clean-restart checkpoint, `train.py` aliases the frozen baseline. New work should be implemented in `src/` and exposed through `train.py` while keeping `baseline_train.py` unchanged.
@@ -203,7 +230,20 @@ Evaluate an experiment that stores `y` and `pred` in an NPZ:
 python scripts/eval.py --npz outputs/my_experiment/validation_predictions.npz
 ```
 
-## 6. Experiment history
+## 6. Fresh-pull recovery path
+
+```bash
+cd ~/Aimers/Bitaboost
+git pull
+conda activate bitaboost
+python -m pip install --upgrade -r requirements.txt
+python scripts/prepare_data.py
+python scripts/baseline_train.py
+```
+
+If baseline reproduction is outside tolerance, do not start a new experiment until the environment/data difference is explained.
+
+## 7. Experiment history
 
 All previous numerical attempts, rejected directions, and rejection reasons are recorded in:
 
