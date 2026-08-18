@@ -1,0 +1,45 @@
+experiment: night_campaign_20260819
+baseline_config: configs/baseline_safe_981.yaml
+pitcher_col: pitcher_id
+
+# Rolling chronological validation. 2024 is weighted most heavily because it is
+# closest to the hidden 2025 season, but instability across 2022/2023 is penalized.
+fold_seasons:
+  - 2022
+  - 2023
+  - 2024
+stability_penalty: 0.25
+reserve_minutes: 20
+
+# Frozen history families. Every row from season s uses only source seasons < s.
+history_modes:
+  - prev
+  - recent2
+  - career
+reliability_grid:
+  - 50
+  - 100
+  - 200
+  - 500
+  - 1000
+
+# The two processes are isolated externally with CUDA_VISIBLE_DEVICES=2 / 3.
+# Inside each process CatBoost sees exactly one logical GPU and always uses device 0.
+gpu2:
+  physical_gpu: 2
+  output_dir: outputs/night_20260819/gpu2
+  purpose: structural_feature_temporal_search
+
+gpu3:
+  physical_gpu: 3
+  output_dir: outputs/night_20260819/gpu3
+  purpose: rolling_oof_calibration_and_residual_stacking
+
+campaign_output_dir: outputs/night_20260819
+
+safe_contract:
+  - no evaluation-row sorting, shift, rolling, aggregation, or cross-row reference
+  - row features may use the current official pre-pitch row
+  - historical profiles for season s use only official seasons strictly before s
+  - calibration/stacking for fold s uses only OOF predictions from folds before s
+  - frozen SAFE982 is never tuned directly on 2024 labels in this campaign
