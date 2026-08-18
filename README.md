@@ -1,169 +1,342 @@
-# Tablatent — VAE latent control-probability experiments
+# Bitaboost
 
-LG Aimers 9기 야구 해커톤에서 pitch 직전 tabular state를 두 개의 latent branch로 압축하고, `control_success` 확률을 예측하는 실험 저장소입니다.
+Compact, reproducible research repository for the **LG Aimers 9 baseball next-pitch control-probability task**.
 
-## Current split
+The project predicts `control_success` for each pitch row. The current stable checkpoint is the recovered **SAFE982** baseline: a rule-safe ensemble reconstructed from the historical Tablatent research lineage and then re-run end-to-end from source.
 
-- 2019~2022: train
-- 2023: validation
-- 2024: untouched holdout
+## Current checkpoint
 
-## Stage 1 — two-branch VAE
+**Stable branch:** `bitaboost-stable`  
+**Frozen checkpoint:** `checkpoint/2026-08-18-safe982`  
+**Checkpoint date:** 2026-08-18
 
-- `mu_context`: 16D, 현재 경기 상황
-- `mu_history`: 16D, 해당 시점까지의 `asof_*` history snapshot
-- Stage 1은 `control_success`를 사용하지 않음
-- `pitcher_id`, `batter_id`, team ID도 latent 입력에서 제외
-- Stage 2에는 posterior sample이 아니라 deterministic posterior mean `mu`를 전달
-- 현재 KL beta: context/history 모두 `5e-4`, warm-up 10 epochs
+Observed 2024 validation result on the RTX 4090 setup:
+
+```text
+Final Brier = 0.247352360403
+Score       = 982.5854
+reference_pass = True
+```
+
+Historical SAFE reference:
+
+```text
+Brier = 0.247355098397
+Score = 981.4893
+```
+
+The recovered run slightly exceeds the historical reference while remaining within the configured reproduction tolerance. This is the baseline to return to before future ablations.
+
+> 2024 is **not a pristine holdout**. It has already been used extensively for validation, model selection, and recovery. Treat the score above as an internal research reference, not as an unbiased estimate of hidden-test performance.
+
+## What the model is
+
+SAFE982 is **not one CatBoost model**. It is a small ensemble of complementary CatBoost models built around different views of the same row and frozen historical state.
+
+At a high level:
+
+```text
+                         ┌─────────────────────────────┐
+                         │  row + frozen history      │
+                         │  regime/context features   │
+                         └──────────────┬──────────────┘
+                                        │
+                 ┌──────────────────────┼──────────────────────┐
+                 │                      │                      │
+                 ▼                      ▼                      ▼
+        direct multitask        auxiliary heads        hurdle decomposition
+          MultiRMSE              reverse/middle        gate × conditional
+                 │                      │                      │
+                 └───────────────┬──────┴──────────────┬───────┘
+                                 │                     │
+                                 ▼                     │
+                           MIXED predictor             │
+                                 │                     │
+                    ┌────────────┼────────────┐        │
+                    │            │            │        │
+                    ▼            ▼            ▼        │
+                  mixed       offset400    joint600    │
+                    └────────────┬────────────┘        │
+                                 ▼                     │
+                             SAFE core                 │
+                                 │                     │
+                                 └──────────┬──────────┘
+                                            ▼
+                              + structured-id600
+                                            │
+                                            ▼
+                                          FINAL
+```
+
+The ensemble is fitted **separately for game-type domains `R` and `F`**, because the data exhibits a substantial regime/domain shift and the best constituent mix is not the same in both domains.
+
+## Model components
+
+### 1. Direct multitask model
+
+A depth-8 CatBoost `MultiRMSE` model jointly predicts success and reconstructed pitch-state targets.
+
+```text
+outputs = [success × 8, reverse, middle, ball, strike]
+trees   = 600
+F row weight = 2.0
+```
+
+Repeating the success target gives the primary task more influence while retaining shared structure from the auxiliary outcomes.
+
+### 2. Reverse / middle auxiliary heads
+
+Two standalone CatBoost binary classifiers estimate:
+
+```text
+reverse600 = P(reverse)
+middle400  = P(middle)
+```
+
+Their targets are reconstructed from cumulative pre-pitch `asof_*` rates. Historical parity matters here: the standalone heads use the full-frame reconstruction scope that existed in the original experiment.
+
+### 3. Hurdle decomposition
+
+The hurdle branch separates two questions:
+
+```text
+gate600 = P(no reverse and no middle)
+cond400 = P(control_success | gate state)
+```
+
+The gate is trained with an RMSE/Brier-style regression objective; the conditional head is a Logloss classifier.
+
+### 4. Mixed predictor
+
+The direct and hurdle views are combined through the recovered logical decomposition:
+
+```text
+independent_gate = clip(
+    1 - reverse600 - middle400 - 1.2 * reverse600 * middle400,
+    0, 1
+)
+
+hybrid_gate = 0.4 * independent_gate + 0.6 * gate600
+logic       = hybrid_gate * cond400
+
+mixed = domain-wise blend(direct, logic)
+```
+
+The blend coefficient is fitted independently for `R` and `F`.
+
+Recovered 2026-08-18 run:
+
+```text
+mixed Brier = 0.247377078372
+R blend     = 0.374113214243
+F blend     = 0.697950494554
+```
+
+### 5. Old-cross1 residual model
+
+A separate 400-tree CatBoost residual model predicts correction around a recent prior.
+
+It deliberately uses the preserved **old `cross1` feature definition**, not the later expanded cross implementation:
+
+```text
+eng_anchor_cross_success
+eng_anchor_cross_middle
+eng_anchor_pitch_success_shrunk
+eng_anchor_batter_success_shrunk
+eng_anchor_gap_logratio
+```
+
+This component reproduced the historical prediction vector **bit-for-bit**.
+
+### 6. Joint auxiliary-state model
+
+A 600-tree CatBoost `MultiClass` model predicts the joint combination of:
+
+```text
+reverse / middle / ball / strike
+```
+
+The predicted class distribution is converted back to a success probability using the historical domain-conditioned success mapping. This component also reproduced the historical prediction vector **bit-for-bit**.
+
+### 7. Structured outcome model
+
+A pre-rich 600-tree `MultiClass` model with `pitcher_id` and `batter_id` predicts five outcome states:
+
+```text
+0: success
+1: failure with neither reverse nor middle
+2: failure with reverse only
+3: failure with middle only
+4: failure with both
+```
+
+Its class-0 probability is used as the success prediction. Historically it contributed only a small `F`-domain correction, but that small correction improved the final Brier. The recovered vector matches the historical artifact to numerical precision.
+
+## Final ensemble
+
+The final combination has two stages.
+
+```text
+SAFE  = R/F simplex(mixed, offset400, joint600)
+FINAL = R/F simplex(SAFE, structured-id600)
+```
+
+Historical SAFE-core weights were approximately:
+
+```text
+R:
+  mixed   0.78368392
+  offset  0.20305241
+  joint   0.01326367
+
+F:
+  mixed   0.51146784
+  offset  0.37011603
+  joint   0.11841613
+```
+
+Historical final correction:
+
+```text
+R: SAFE only
+F: 0.958476824 * SAFE + 0.041523176 * structured-id600
+```
+
+The current training script refits these simplex weights from the generated 2024 validation predictions instead of hard-coding rounded constants.
+
+## Feature families
+
+The model uses supplied row features plus inference-safe historical state. Main families are:
+
+- raw game context, count, base state, score, hands, teams, IDs where explicitly enabled;
+- supplied pitcher/batter `asof_*` history statistics;
+- 2023+ regime indicator and R-domain regime interactions;
+- frozen pitcher and batter anchor state;
+- batter-anchor and anchor-cross state;
+- frozen pitcher-batter matchup profiles;
+- frozen count, pressure, and game-type domain profiles;
+- frozen auxiliary and conditional profiles;
+- target-free context interactions;
+- prior-season entity path state.
+
+All hidden-test rows must remain independent prediction targets. The SAFE contract forbids hidden-test peer aggregation, rolling updates from other hidden rows, or adaptation to the hidden-test distribution.
+
+Current recovered feature counts:
+
+```text
+rich       185
+hurdle     185
+offset      90
+structured  74
+```
+
+## Reproduction audit
+
+The 2026-08-18 recovery was checked directly against preserved historical prediction artifacts:
+
+| Component | MAE | RMSE | MAX |
+|---|---:|---:|---:|
+| mixed | 9.756e-04 | 1.328e-03 | 1.113e-02 |
+| offset | 0.000e+00 | 0.000e+00 | 0.000e+00 |
+| joint | 0.000e+00 | 0.000e+00 | 0.000e+00 |
+| structured | 1.600e-08 | 1.954e-08 | 7.180e-08 |
+| safe | 7.132e-04 | 9.359e-04 | 7.216e-03 |
+| final | 7.085e-04 | 9.283e-04 | 7.216e-03 |
+
+The residual difference is concentrated in the mixed lineage. Offset and joint are exact, structured is numerically identical, and the full pipeline passes the configured historical reference tolerance.
+
+## Repository structure
+
+```text
+configs/
+  baseline_safe_981.yaml       # frozen baseline recipe + provenance + runtime policy
+
+scripts/
+  prepare_data.py              # CSV -> fast local cache
+  baseline_train.py            # one-command training + 2024 validation + artifact audit
+  eval.py                      # evaluate saved predictions
+
+src/bitaboost/
+  baseline.py                  # training orchestration
+  features.py                  # recovered SAFE feature composition
+  ensemble.py                  # R/F mixed + simplex ensemble logic
+  references.py                # read-only historical prediction audit
+  runtime.py                   # one-GPU and quiet logging policy
+  _legacy/                     # frozen historical helper/source definitions
+
+experiments/
+  configs/                     # future experiment configs
+
+checkpoints/
+  2026-08-18_SAFE982.md        # frozen checkpoint record
+
+outputs/
+  baseline/                    # baseline artifacts
+  experiments/                 # isolated experiment outputs
+```
+
+`src/bitaboost/_legacy/` is **not** the research surface. It exists to preserve historical semantics required for reproducibility. New work should be implemented through clean reusable code/configs outside that directory.
+
+## Run
 
 ```bash
-python scripts/run_stage1.py --config configs/default.yaml
+conda activate bitaboost
+cd ~/Aimers/Bitaboost
+
+python scripts/prepare_data.py --config configs/baseline_safe_981.yaml
+python scripts/baseline_train.py --config configs/baseline_safe_981.yaml
+python scripts/eval.py --config configs/baseline_safe_981.yaml
 ```
 
-고정 데이터 URL:
+The baseline runner exposes only physical GPU 2:
 
-`https://drive.google.com/file/d/1RqoOknOl39FnNMgHZ-DQrVim8Of-odKM/view?usp=drive_link`
+```text
+CUDA_VISIBLE_DEVICES=2
+CatBoost devices="0"
+```
 
-## Stage 1 cache
+This intentionally uses exactly one RTX 4090. Multi-GPU settings are rejected by config validation.
 
-Stage 1을 다시 학습하지 않도록 Google Drive 또는 로컬 동기화 Drive 경로에 Stage 1 결과를 보존할 수 있습니다.
+## Checkpoint / restore
+
+Return to the immutable 2026-08-18 checkpoint:
 
 ```bash
-python scripts/stage1_cache.py push
-python scripts/stage1_cache.py pull
+git fetch origin
+git switch -c restore-safe982 --track origin/checkpoint/2026-08-18-safe982
 ```
 
-Windows Google Drive처럼 별도 경로를 쓰면:
-
-```powershell
-python scripts/stage1_cache.py push --drive-dir "G:\내 드라이브\학습\LG Aimers 9기\해커톤\오프라인\data\Tablatent\stage1_cache"
-python scripts/stage1_cache.py pull --drive-dir "G:\내 드라이브\학습\LG Aimers 9기\해커톤\오프라인\data\Tablatent\stage1_cache"
-```
-
-기본 cache에는 다음을 포함합니다.
-
-```text
-outputs/latents/context.npy
-outputs/latents/history.npy
-outputs/latents/context_logvar.npy
-outputs/latents/history_logvar.npy
-outputs/checkpoints/stage1_context.pt
-outputs/checkpoints/stage1_history.pt
-outputs/checkpoints/preprocessors.joblib
-outputs/logs/stage1_training.json
-data/processed/train.pkl
-```
-
-각 파일은 SHA256 manifest로 검증합니다. processed dataset을 Drive에 저장하고 싶지 않으면 `--exclude-data`를 사용합니다.
-
-## Stage 2 — current experiment: CatBoost on frozen latent
-
-현재 기본 Stage 2는 Stage 1에서 만든 posterior mean만 사용합니다.
-
-```text
-mu_context 16D
-mu_history 16D
-     ↓ concat
-32 numeric latent features
-     ↓
-CatBoostClassifier
-     ↓
-control_success probability
-```
-
-제약:
-
-- Stage 1 frozen
-- raw feature 미사용
-- player/team ID 미사용
-- local probability 미사용
-- 2024 holdout 미사용
-- latent standardization 미사용
-
-GPU 학습과 early stopping은 `Logloss`를 사용하고, 최종 선택된 모델의 `predict_proba`로 validation Brier를 별도로 계산해 주 평가값으로 기록합니다.
+Return to the promoted stable line:
 
 ```bash
-python scripts/train_stage2.py --config configs/default.yaml --head catboost
+git fetch origin
+git switch -C bitaboost-stable origin/bitaboost-stable
 ```
 
-현재 default head도 `catboost`입니다.
-
-주요 출력:
-
-```text
-outputs/stage2_catboost/stage2_catboost.cbm
-outputs/stage2_catboost/metrics.json
-outputs/stage2_catboost/validation_predictions.csv
-outputs/stage2_catboost/feature_importance.csv
-```
-
-현재 2023 validation 결과:
-
-```text
-best iteration  23
-BCE             0.69242962
-Brier           0.24964003
-AUC             0.530320
-official-style  143.99
-```
-
-## Stage 2 comparison probes
-
-기존 probe는 삭제하지 않고 같은 frozen latent와 temporal split에서 비교합니다.
+The stable reference command is always:
 
 ```bash
-python scripts/train_stage2.py --config configs/default.yaml --head linear
-python scripts/train_stage2.py --config configs/default.yaml --head mlp
-python scripts/train_stage2.py --config configs/default.yaml --head bilinear
+python scripts/baseline_train.py --config configs/baseline_safe_981.yaml
 ```
 
-현재 기록된 validation Brier:
+## Research policy from this checkpoint
+
+SAFE982 is the **control** for future research. New ideas should be measured as deltas against this checkpoint rather than silently changing the baseline.
+
+Preferred workflow:
 
 ```text
-CatBoost   0.24964003
-linear     0.25032231
-bilinear   0.25070280
-mlp        0.25137261
+SAFE982 checkpoint
+      ↓
+new hypothesis / ablation
+      ↓
+separate experiment config + prediction artifact
+      ↓
+compare Brier overall + R/F + robustness
+      ↓
+promote only if improvement is reproducible
 ```
 
-## Diagnostic leaderboard submission
+Do not create a large collection of `run_foo_v2_final2.py` scripts. Prefer configs under `experiments/configs/` and reusable modules under `src/bitaboost/`. Every meaningful experiment should preserve enough metadata to recover the exact source/config that produced its predictions.
 
-현재 CatBoost-on-latent 모델을 실제 2025 evaluator에서 확인하기 위한 진단용 `submit.zip`을 만들 수 있습니다. 이 패키지는 현재 개발 artifact를 그대로 사용하며 **최종 2019~2024 재학습 모델이 아닙니다.**
-
-```powershell
-python scripts/build_submission.py
-```
-
-출력:
-
-```text
-dist/submit.zip
-```
-
-ZIP 최상위 구조는 DACON 코드 제출 형식에 맞게 고정됩니다.
-
-```text
-submit.zip
-├─ model/
-├─ script.py
-└─ requirements.txt
-```
-
-`model/`에는 현재 Stage1 context/history VAE checkpoint, train-fit preprocessor, CatBoost Stage2 모델과 inference에 필요한 최소 `src` 정의만 포함합니다. `script.py`는 서버의 `test.csv` 각 행을 학습 당시 preprocessor로 변환해 32D posterior mean을 만들고 CatBoost 확률을 계산한 뒤 `output/submission.csv`를 생성합니다.
-
-공식 5행 샘플을 가진 로컬 디렉터리가 있으면 ZIP 생성 전에 end-to-end smoke test도 할 수 있습니다.
-
-```powershell
-python scripts/build_submission.py --smoke-data-dir "C:\path\to\official\data"
-```
-
-추론 패키지의 `requirements.txt`에는 평가 서버 기본 설치 패키지를 중복 설치하지 않고 `catboost==1.2.10`만 넣습니다.
-
-## Legacy / diagnostic experiments
-
-`evaluate_knn.py`, `build_stage2_dataset.py`, `src/stage2.py`, `src/stage2_regularized.py`는 latent neighborhood와 local-probability 실험을 재현하기 위해 유지합니다.
-
-```bash
-python scripts/evaluate_knn.py --config configs/default.yaml
-```
+Submission ZIP construction remains intentionally separate from this research baseline.
