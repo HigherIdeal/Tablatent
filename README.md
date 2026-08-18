@@ -62,13 +62,14 @@ pyyaml==6.0.1
 rich==13.7.1
 ```
 
-Only the library missing from the competition environment is listed in this repository:
+Only libraries absent from that base runtime are repository-managed:
 
 ```text
 catboost==1.2.10
+pyarrow==17.0.0
 ```
 
-Install only that extra dependency:
+Install only those extras:
 
 ```bash
 cd ~/Aimers/Bitaboost
@@ -76,7 +77,7 @@ conda activate bitaboost
 pip install -r requirements.txt
 ```
 
-Do **not** run a broad `pip install --upgrade ...` over the competition packages. The baseline preflight deliberately checks the important versions before training.
+Do **not** broadly upgrade the competition packages. Baseline validation checks the runtime fingerprint before expensive training starts.
 
 ## 2. GPU policy
 
@@ -102,18 +103,18 @@ Expected mapping:
 
 ## 3. Data cache
 
-The processed cache is intentionally **not pickle and not Parquet**.
+The processed cache is Parquet:
 
 ```text
-data/processed/train.csv.gz
+data/processed/train.parquet
 ```
 
-Why `csv.gz`:
+Why Parquet:
 
-- no NumPy pickle module-path compatibility problem;
-- no `pyarrow`/`fastparquet` dependency;
-- works with the existing pandas 2.0.3 runtime;
-- keeps `requirements.txt` limited to CatBoost.
+- avoids NumPy/Python pickle module-path coupling;
+- preserves tabular dtypes better than a CSV cache;
+- fast repeated loading for experiments;
+- `pyarrow==17.0.0` is the only extra cache dependency.
 
 If the existing official data directory is reused:
 
@@ -122,9 +123,9 @@ cd ~/Aimers/Bitaboost
 ln -s /home/kjw/Aimers/Tablatent_backup/data data
 ```
 
-`prepare_data.py` searches `data/` for the official training CSV containing `control_success`, preferring `data/train.csv` and `data/raw/extracted/train.csv`.
+If `data` already exists, do not recreate the symlink. `prepare_data.py` searches `data/` for the official training CSV containing `control_success`, preferring `data/train.csv` and `data/raw/extracted/train.csv`.
 
-Build or refresh the portable cache:
+Build or refresh the cache:
 
 ```bash
 python scripts/prepare_data.py --force
@@ -135,7 +136,7 @@ Check it:
 ```bash
 python - <<'PY'
 import pandas as pd
-x = pd.read_csv('data/processed/train.csv.gz', compression='gzip', low_memory=False)
+x = pd.read_parquet('data/processed/train.parquet', engine='pyarrow')
 print('shape:', x.shape)
 print(x.groupby('season')['control_success'].agg(['size', 'mean']))
 PY
@@ -143,43 +144,64 @@ PY
 
 Expected total rows: about `1,475,092`, seasons `2019..2024`.
 
-## 4. Baseline validation — first command before experiments
+The old `data/processed/train.pkl` is intentionally ignored even if it remains on disk.
 
-### Step A: confirm environment + install CatBoost
+## 4. Baseline validation — mandatory before new experiments
+
+### Step A: sync code
 
 ```bash
 conda activate bitaboost
 cd ~/Aimers/Bitaboost
+git pull
+```
+
+### Step B: install only repository extras
+
+```bash
 pip install -r requirements.txt
 ```
 
-Optional manual version check:
+### Step C: verify versions
 
 ```bash
 python - <<'PY'
-import numpy, pandas, scipy, sklearn, torch, catboost
+import numpy, pandas, scipy, sklearn, torch, catboost, pyarrow
 print('numpy   ', numpy.__version__)
 print('pandas  ', pandas.__version__)
 print('scipy   ', scipy.__version__)
 print('sklearn ', sklearn.__version__)
 print('torch   ', torch.__version__)
 print('catboost', catboost.__version__)
+print('pyarrow ', pyarrow.__version__)
 PY
 ```
 
-### Step B: build the cache
+Canonical values:
+
+```text
+numpy    1.26.4
+pandas   2.0.3
+scipy    1.15.3
+sklearn  1.8.0
+torch    2.7.1+cu128
+catboost 1.2.10
+pyarrow  17.0.0
+```
+
+### Step D: rebuild the processed dataset
 
 ```bash
 python scripts/prepare_data.py --force
 ```
 
-### Step C: reproduce the Codex SAFE maximum
+### Step E: reproduce the Codex SAFE maximum
 
 ```bash
 python scripts/baseline_train.py
 ```
 
-At startup the script prints the runtime fingerprint. Critical mismatches in NumPy, pandas, SciPy, scikit-learn, Torch, or CatBoost stop the run before expensive training.
+At startup the script prints the runtime fingerprint. Critical mismatches in NumPy, pandas, SciPy, scikit-learn, Torch, CatBoost, or PyArrow stop the run before expensive training.
 
 Expected end-of-run check:
 
@@ -194,13 +216,13 @@ BASELINE_OK
 
 GPU CatBoost can show tiny numerical variation, so the checker uses a small tolerance.
 
-If you intentionally want to inspect a slightly different runtime without hard failure:
+If intentionally diagnosing a different runtime:
 
 ```bash
 python scripts/baseline_train.py --no-strict-env
 ```
 
-Do not treat such a run as the canonical reproduction until the difference is explained.
+Do not treat that as the canonical reproduction until any version difference is explained.
 
 ## 5. Inspect a reproduced package
 
@@ -210,7 +232,7 @@ Without retraining:
 python scripts/eval.py --zip dist/baseline_SAFE.zip
 ```
 
-If `data/test.csv` and `data/sample_submission.csv` are present, validate the actual packaged inference path too:
+If `data/test.csv` and `data/sample_submission.csv` are present, validate the packaged inference path too:
 
 ```bash
 python scripts/baseline_train.py --smoke
@@ -254,7 +276,7 @@ R/F-specific convex ensemble
 python scripts/train.py --output dist/train_latest.zip
 ```
 
-At the clean-restart checkpoint `train.py` aliases the frozen baseline. Future modeling code should be added under `src/` and exposed through `train.py`; do not modify the baseline checkpoint merely to test an idea.
+At this clean-restart checkpoint `train.py` aliases the frozen baseline. Future modeling code should be added under `src/` and exposed through `train.py`; do not modify the baseline checkpoint merely to test an idea.
 
 For NPZ validation predictions containing `y` and `pred`:
 
