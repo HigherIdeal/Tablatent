@@ -46,7 +46,7 @@ test 2023 -> 2022 : train current-season pairs 2020-2022
 test 2024 -> 2023 : train current-season pairs 2020-2023
 ```
 
-Both current and previous seasons must satisfy the configured minimum pitch count. The default run checks thresholds 50 and 200.
+Both current and previous seasons must satisfy the configured minimum pitch count.
 
 ### Baselines and metrics
 
@@ -58,13 +58,73 @@ No Brier/SOTA score is used because this experiment does not predict `control_su
 
 The critical diagnostic is whether the learned model beats the persistence baseline. If even raw persistence beats the mean strongly, the player trait is temporally reversible. If CatBoost additionally beats persistence across folds, a non-trivial backward mapping exists.
 
-### Run
+Runner:
 
 ```bash
-conda activate bitaboost
-cd ~/Aimers/Bitaboost
 python scripts/ex1/run_pitcher_season_backward.py \
   --config experiments/configs/ex1_pitcher_season_backward.yaml
 ```
 
-Outputs are isolated under `outputs/experiments/ex1/pitcher_season_backward/`; final-fold model artifacts are stored under `models/ex1/`. Nothing in EX1-B loads, retrains, blends, or modifies SAFE982.
+## EX1-C: automatic four-stage backward suite
+
+EX1-C turns the follow-up analysis into one reproducible run. It still does not load SAFE982 predictions or train the competition forward model.
+
+### Stage 1 — target decomposition
+
+Direct backward reconstruction is evaluated separately for `success`, `reverse`, `middle`, `ball`, and `strike`. Each target reports RMSE, MAE, Pearson, and Spearman together with persistence and train-mean baselines. Thresholds 50/200/500 and rolling 2022/2023/2024 folds are run automatically for both `state_only` and `state_plus_id`.
+
+### Stage 2 — delta backward
+
+Instead of directly predicting the previous state, the model predicts:
+
+```text
+Delta = past_state - current_state
+past_hat = current_state + Delta_hat
+```
+
+This tests whether the learnable signal is specifically the temporal change away from the strong identity baseline.
+
+### Stage 3 — career-group analysis
+
+One `state_only` backward model is fitted per rolling fold and its held-out predictions are sliced by cumulative career entering the current season:
+
+```text
+very_low    : < 200 prior pitches
+developing  : 200-999
+established : 1000-2999
+veteran     : 3000+
+```
+
+This distinguishes noisy short-history pitchers from stable long-career traits without training a different model for every group.
+
+### Stage 4 — forward/backward symmetry
+
+The exact same adjacent pitcher-season samples and CatBoost capacity are used for both directions:
+
+```text
+backward : Z(s)   -> Z(s-1)
+forward  : Z(s-1) -> Z(s)
+```
+
+The main diagnostic is `backward_rmse - forward_rmse`, plus per-target metrics. This tests whether future state contains more information about the past than past state contains about the future.
+
+### Minimal preprocessing
+
+The suite intentionally avoids the 50-60 second SAFE feature preparation used by EX1-B. It loads only the canonical pitch frame and reconstructs the auxiliary outcomes needed to form pitcher-season states; frozen anchors, matchup profiles, regime features, and other forward-model features are skipped.
+
+### Run all four stages
+
+```bash
+conda activate bitaboost
+cd ~/Aimers/Bitaboost
+python scripts/ex1/run_backward_suite.py \
+  --config experiments/configs/ex1_backward_suite.yaml
+```
+
+The full report is written to:
+
+```text
+outputs/experiments/ex1/backward_suite/metrics_backward_suite.json
+```
+
+Nothing in EX1-C loads, retrains, blends, or modifies SAFE982.
