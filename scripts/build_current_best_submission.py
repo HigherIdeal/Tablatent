@@ -97,7 +97,6 @@ def _rewrite_zip(root: Path, output_zip: Path) -> None:
 
 
 def patch_runtime_dependencies(raw_zip: Path) -> None:
-    """Keep repo scripts clean while bundling frozen core modules inside the submit ZIP."""
     with tempfile.TemporaryDirectory(prefix="bitaboost_patch_") as td:
         root = Path(td)
         with zipfile.ZipFile(raw_zip) as zf:
@@ -156,7 +155,7 @@ def read_metadata(package_zip: Path) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser(description="Train and package the rule-safe Bitaboost baseline/current-best model.")
     ap.add_argument("--config", default="configs/baseline.yaml")
-    ap.add_argument("--gpus", default="all", help="Physical GPU ids, e.g. all or 0,1,2,3. Default: all detected GPUs.")
+    ap.add_argument("--gpus", default="2", help="Physical GPU id. Default: 2 (single RTX 4090).")
     ap.add_argument("--output", default="dist/current_best_SAFE.zip")
     ap.add_argument("--smoke-data-dir", default="data")
     ap.add_argument("--skip-smoke", action="store_true")
@@ -173,8 +172,6 @@ def main() -> None:
         raw_zip = td / "raw.zip"
         portable_zip = td / "portable.zip"
 
-        # The frozen implementation is executed with a fake top-level __file__ so its
-        # original ROOT calculations remain byte-for-byte compatible with the old repo.
         _exec_legacy(
             LEGACY / "build_current_best_submission_impl.py",
             "build_current_best_submission.py",
@@ -183,7 +180,7 @@ def main() -> None:
                 "--devices", logical_devices,
                 "--output", str(raw_zip),
                 "--skip-smoke",
-                "--disable-paths",  # safe 1098.86143 lineage; no peer-row path features
+                "--disable-paths",
             ],
         )
         patch_runtime_dependencies(raw_zip)
