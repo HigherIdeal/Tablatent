@@ -13,8 +13,8 @@ REFERENCE_BRIER = 0.247355098
 REFERENCE_SCORE = 981.5
 REFERENCE_LB = 1098.86143
 
-# Competition/test_trial environment fingerprint. Only CatBoost is installed by
-# requirements.txt; these packages are expected to already exist on the server.
+# Competition/test_trial environment fingerprint. CatBoost and PyArrow are the
+# only repository-managed extras; everything else should already match the server.
 EXPECTED_RUNTIME = {
     "torch": "2.7.1+cu128",
     "pandas": "2.0.3",
@@ -33,8 +33,17 @@ EXPECTED_RUNTIME = {
     "PyYAML": "6.0.1",
     "rich": "13.7.1",
     "catboost": "1.2.10",
+    "pyarrow": "17.0.0",
 }
-CRITICAL_RUNTIME = {"torch", "pandas", "numpy", "scipy", "scikit-learn", "catboost"}
+CRITICAL_RUNTIME = {
+    "torch",
+    "pandas",
+    "numpy",
+    "scipy",
+    "scikit-learn",
+    "catboost",
+    "pyarrow",
+}
 
 
 def package_version(name: str) -> str:
@@ -56,7 +65,7 @@ def preflight_environment(strict: bool = True) -> None:
     if mismatches and strict:
         detail = ", ".join(f"{n}={a} (expected {e})" for n, a, e in mismatches)
         raise SystemExit(
-            "Critical runtime does not match the test_trial/competition baseline: " + detail
+            "Critical runtime does not match the Bitaboost baseline: " + detail
         )
     if mismatches:
         print("[env] WARNING: critical version mismatch accepted because --no-strict-env was used")
