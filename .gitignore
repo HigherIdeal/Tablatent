@@ -1,21 +1,21 @@
+# Data and generated artifacts
 data/
-outputs/checkpoints/*
-outputs/latents/*
-outputs/logs/*
-!outputs/checkpoints/.gitkeep
-!outputs/latents/.gitkeep
-!outputs/logs/.gitkeep
+outputs/
 dist/
+models/
+
+# Python
 __pycache__/
 *.py[cod]
-.ipynb_checkpoints/
-models/Qwen3-1.7B/
+*.egg-info/
+.pytest_cache/
 
-# Generated experiment artifacts
-outputs/
+# Environments / IDE
+.venv/
+venv/
+.vscode/
+.idea/
 
-# Submission/build packages
-dist/
-
-# Local pretrained models
-models/
+# OS / temp
+.DS_Store
+*.log

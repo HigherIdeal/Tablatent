@@ -1,0 +1,25 @@
+seed: 42
+
+paths:
+  processed_file: data/processed/train.pkl
+  output_dir: outputs
+
+data:
+  target_col: control_success
+  season_col: season
+  row_id_col: row_id
+  train_seasons: [2019, 2020, 2021, 2022]
+  val_seasons: [2023]
+  test_seasons: [2024]
+
+# Kept for compatibility with the frozen CatBoost baseline core.
+raw_catboost:
+  iterations: 3000
+  learning_rate: 0.03
+  depth: 8
+  l2_leaf_reg: 10.0
+  random_strength: 0.5
+  early_stopping_rounds: 100
+  task_type: GPU
+  devices: "0"
+  verbose: 0
