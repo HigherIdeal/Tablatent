@@ -19,11 +19,12 @@ python -m py_compile \
   scripts/night/run_gpu3_calibration.py \
   scripts/night/summarize_night.py \
   scripts/night/watch_summary.py
-PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}" python - <<'PY'
+NIGHT_CONFIG="$CONFIG" PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}" python - <<'PY'
+import os
 from bitaboost.night.common import load_yaml
 from bitaboost.night.gpu2_structure import _initial_trials
 from bitaboost.night.gpu3_calibration import _method_queue
-cfg = load_yaml("experiments/configs/night_campaign_20260819.yaml")
+cfg = load_yaml(os.environ["NIGHT_CONFIG"])
 assert _initial_trials(cfg), "GPU2 trial queue is empty"
 assert _method_queue(), "GPU3 method queue is empty"
 print("[preflight] night campaign Python import/config check passed", flush=True)
