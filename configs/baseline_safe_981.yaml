@@ -1,0 +1,90 @@
+project:
+  name: bitaboost-safe-981
+  seed: 42
+
+data:
+  raw_train: data/raw/train.csv
+  processed_train: data/processed/train.pkl
+  manifest: data/processed/manifest.json
+  target_col: control_success
+  season_col: season
+  validation_season: 2024
+
+runtime:
+  physical_gpu: "2"
+  catboost_device: "0"
+  gpu_ram_part: 0.92
+  suppress_performance_warnings: true
+
+catboost:
+  iterations: 600
+  learning_rate: 0.03
+  depth: 8
+  l2_leaf_reg: 20.0
+  random_strength: 0.5
+  bootstrap_type: Bayesian
+  bagging_temperature: 0.5
+  border_count: 128
+  random_seed: 42
+  has_time: true
+  one_hot_max_size: 10
+  allow_writing_files: false
+  logging_level: Silent
+
+recipe:
+  direct:
+    success_repeats: 8
+    f_weight: 2.0
+    tree: 600
+    aux_profile_extra: pressure
+  aux_heads:
+    reverse_tree: 600
+    middle_tree: 400
+  gate_conditional:
+    gate_loss: brier
+    gate_tree: 600
+    conditional_loss: logloss
+    conditional_tree: 400
+    f_weight: 1.0
+    reuse_conditional: true
+  mixed:
+    interaction_c: -1.2
+    independent_gate_weight: 0.4
+    learned_gate_weight: 0.6
+    fit_domain_blend: true
+    expected_domain_blend:
+      R: 0.36778562369546725
+      F: 0.6907781178377251
+  offset:
+    feature_version: cross1
+    prior: recent
+    tree: 400
+    old_f_weight: 1.0
+  joint:
+    tree: 600
+    f_weight: 2.0
+  structured:
+    mode: ids_pre_rich
+    tree: 600
+  safe_ensemble:
+    fit_weights: true
+    expected_weights:
+      R: [0.78368392, 0.20305241, 0.01326367]
+      F: [0.51146784, 0.37011603, 0.11841613]
+  final_ensemble:
+    fit_weights: true
+    expected_weights:
+      R: [1.0, 0.0]
+      F: [0.958476823938, 0.041523176062]
+
+output:
+  dir: outputs/baseline
+  save_models: false
+  save_components: true
+
+reference:
+  mixed_brier: 0.24738012841754628
+  safe_core_brier: 0.247355195959
+  final_brier: 0.247355098397
+  final_score: 981.4893
+  brier_tolerance: 0.000005
