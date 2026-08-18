@@ -1,0 +1,47 @@
+experiment: ex4_bidirectional_stable_traits
+baseline_config: configs/baseline_safe_981.yaml
+
+output_dir: outputs/experiments/ex4/bidirectional_stable_traits
+model_dir: models/ex4
+pitcher_col: pitcher_id
+
+# EX4 does not predict pitch-level control_success.
+# It asks which pitcher-season state components survive both temporal directions:
+#   past season -> current season
+#   current season -> past season
+# The same adjacent pitcher-season pairs and chronological folds are used in both directions.
+variants:
+  - state_only
+  - state_plus_id
+
+min_pitch_thresholds:
+  - 50
+  - 200
+  - 500
+
+fold_seasons:
+  - 2022
+  - 2023
+  - 2024
+
+# The primary diagnostic avoids player-ID memorization and uses the reliability level
+# where EX1-B showed the cleanest cross-fold backward relation.
+primary_variant: state_only
+primary_threshold: 200
+
+# A state is selected as bidirectionally stable only if BOTH directions satisfy these
+# transparent criteria across chronological folds.
+selection:
+  min_mean_pearson: 0.20
+  min_mean_spearman: 0.20
+  min_better_than_mean_fraction: 0.6666667
+
+catboost:
+  iterations: 400
+  learning_rate: 0.03
+  depth: 4
+  l2_leaf_reg: 10.0
+  random_strength: 0.5
+  bootstrap_type: Bayesian
+  bagging_temperature: 0.5
+  random_seed: 42
