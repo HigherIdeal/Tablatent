@@ -1,7 +1,7 @@
 seed: 42
 
 paths:
-  processed_file: data/processed/train.parquet
+  processed_file: data/processed/train.csv.gz
   output_dir: outputs
 
 data:
