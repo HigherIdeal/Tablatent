@@ -19,7 +19,7 @@ class PreparedData:
     valid_mask: np.ndarray
     y_valid: np.ndarray
     gt_valid: np.ndarray
-    aux: pd.DataFrame  # full-frame auxiliary reconstruction used by frozen profiles / aux heads
+    aux: pd.DataFrame  # full-frame reconstruction used by frozen profiles / standalone aux heads
     feature_sets: dict[str, list[str]]
     categorical_extra: set[str]
 
@@ -96,12 +96,16 @@ def prepare(cfg: dict) -> PreparedData:
     multi_anchor=[x for s in ("reverse","middle","ball","strike") for x in (f"eng_anchor_{s}_rate",f"eng_since_anchor_{s}_rate",f"eng_since_anchor_{s}_minus_long")]
     base=[*recent_core.feature_set("recent_raw_game_type"),regime_core.RECENT_FLAG,*regime_core.FAST_CONT,*regime_core.RANGE_CONT,*context_core.INTERACTION_COLUMNS,*paths]
     rich=[*base,*anchor_success,*multi_anchor,*banchor,*cross4,*matchup,*count,*pressure,*domain,*auxprof]
-    # Historical hurdle scripts had --anchor but no --multi-anchor: do not inherit rich's 12 multi-anchor columns here.
+    # Historical hurdle scripts had --anchor but no --multi-anchor.
     hurdle=[*base,*anchor_success,*banchor,*cross4,*matchup,*count,*pressure,*domain,*auxprof,*condprof]
     offset=[*base,*anchor_success,*banchor,*cross1]
     structured=[*recent_core.feature_set("recent_raw_game_type"),"pitcher_id","batter_id",regime_core.RECENT_FLAG,*regime_core.FAST_CONT,*regime_core.RANGE_CONT,*context_core.INTERACTION_COLUMNS,*paths]
     for name,features in {"rich":rich,"hurdle":hurdle,"offset":offset,"structured":structured}.items():
         if len(features)!=len(set(features)): raise RuntimeError(f"duplicate {name} features")
-    path_cats={x for x in paths if x.endswith(("last_gt","current_x_last"))}; extra=set(context_core.INTERACTION_COLUMNS)|path_cats|{"pitcher_id","batter_id"}; regime_core.EXTRA_CATEGORICAL.update(extra)
+    # Preserve historical prepare_x semantics exactly. The original scripts only
+    # registered path categories (and IDs in structured mode) in EXTRA_CATEGORICAL;
+    # context-cross strings were consequently coerced to NaN numeric columns. It is
+    # tempting to "fix" that, but doing so would silently change the 981.489 recipe.
+    path_cats={x for x in paths if x.endswith(("last_gt","current_x_last"))}; extra=path_cats|{"pitcher_id","batter_id"}; regime_core.EXTRA_CATEGORICAL.update(extra)
     frame=frame.copy(); gc.collect(); y=pd.to_numeric(frame.loc[valid_mask,cfg["data"]["target_col"]],errors="raise").to_numpy(np.float64); gt=frame.loc[valid_mask,"game_type"].astype(str).to_numpy(); log(f"[data] train={train_mask.sum():,} valid={valid_mask.sum():,} rich={len(rich)} hurdle={len(hurdle)} offset={len(offset)}")
     return PreparedData(frame,train_mask,valid_mask,y,gt,aux,{"rich":rich,"hurdle":hurdle,"offset":offset,"structured":structured},extra)
