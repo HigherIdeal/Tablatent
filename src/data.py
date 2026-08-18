@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import json
-import shutil
 from pathlib import Path
 
 import pandas as pd
 
 EXPECTED_SEASONS = set(range(2019, 2025))
-CACHE_NAME = "train.csv.gz"
+CACHE_NAME = "train.parquet"
 
 
 def _csv_has_target(path: Path, target_col: str) -> bool:
@@ -62,8 +61,7 @@ def _validate_frame(
     season = pd.to_numeric(frame[season_col], errors="coerce")
     if season.isna().any():
         raise ValueError(f"{season_col} contains non-numeric values")
-    seasons = set(season.astype(int).unique())
-    missing = sorted(EXPECTED_SEASONS - seasons)
+    missing = sorted(EXPECTED_SEASONS - set(season.astype(int).unique()))
     if missing:
         raise ValueError(f"missing seasons: {missing}")
     return target, season
@@ -81,7 +79,7 @@ def prepare_dataset(
     output = processed / CACHE_NAME
 
     if output.exists() and not force:
-        frame = pd.read_csv(output, compression="gzip", low_memory=False)
+        frame = pd.read_parquet(output, engine="pyarrow")
         target, season = _validate_frame(
             frame,
             target_col=target_col,
@@ -89,7 +87,7 @@ def prepare_dataset(
         )
         return {
             "processed_file": str(output.relative_to(root)),
-            "format": "csv.gz",
+            "format": "parquet",
             "rows": int(len(frame)),
             "seasons": sorted(season.astype(int).unique().tolist()),
             "target_mean": float(target.mean()),
@@ -104,21 +102,27 @@ def prepare_dataset(
         season_col=season_col,
     )
 
-    tmp = output.with_suffix(output.suffix + ".part")
+    tmp = processed / "train.parquet.part"
     tmp.unlink(missing_ok=True)
-    frame.to_csv(tmp, index=False, compression="gzip")
+    frame.to_parquet(
+        tmp,
+        index=False,
+        engine="pyarrow",
+        compression="zstd",
+    )
     tmp.replace(output)
 
-    # Round-trip once so training never starts from a truncated cache.
-    check = pd.read_csv(output, compression="gzip", low_memory=False)
+    # Validate the cache before any expensive training starts.
+    check = pd.read_parquet(output, engine="pyarrow")
     if len(check) != len(frame) or list(check.columns) != list(frame.columns):
-        raise RuntimeError("csv.gz round-trip validation failed")
+        raise RuntimeError("Parquet round-trip validation failed")
     del check
 
     manifest = {
         "source_csv": str(train_csv),
         "processed_file": str(output.relative_to(root)),
-        "format": "csv.gz",
+        "format": "parquet",
+        "compression": "zstd",
         "rows": int(len(frame)),
         "columns": int(frame.shape[1]),
         "target_mean": float(target.mean()),
@@ -137,9 +141,15 @@ def prepare_dataset(
 def load_frame(config: dict) -> pd.DataFrame:
     path = Path(config["paths"]["processed_file"])
     if not path.exists():
-        raise FileNotFoundError(
-            f"{path} not found; run python scripts/prepare_data.py first"
+        legacy = path.parent / "train.pkl"
+        suffix = (
+            f" Legacy pickle exists at {legacy}, but Bitaboost does not load pickle caches."
+            if legacy.exists()
+            else ""
         )
-    if not str(path).endswith(".csv.gz"):
-        raise ValueError(f"Bitaboost processed cache must be .csv.gz, got: {path}")
-    return pd.read_csv(path, compression="gzip", low_memory=False)
+        raise FileNotFoundError(
+            f"{path} not found; run python scripts/prepare_data.py first.{suffix}"
+        )
+    if path.suffix != ".parquet":
+        raise ValueError(f"Bitaboost processed cache must be Parquet, got: {path}")
+    return pd.read_parquet(path, engine="pyarrow")
