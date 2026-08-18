@@ -2,7 +2,7 @@
 
 Clean restart of the LG Aimers 9 baseball `control_success` project.
 
-The active repository intentionally exposes only five executable scripts. Historical experiment runners are not part of the public workflow; the frozen implementation required to reproduce the last rule-safe Codex baseline lives under `src/baseline_legacy/` and is invoked only through the five entry points below.
+The active workflow exposes only five scripts. Historical experiment code needed for exact baseline reproduction is frozen under `src/baseline_legacy/` and should not be executed directly.
 
 ## Reference baseline
 
@@ -14,7 +14,7 @@ Authoritative **rule-safe** reference:
 | internal score | **981.5** |
 | external leaderboard | **1098.86143** |
 
-The historical prefix-state branch reached `1222.8806` internally, but it is **competition-invalid** because hidden-test rows influenced peer-row features. It is documented in `docs/EXPERIMENT_HISTORY_NUMERICAL.md` and intentionally has no runnable path in this clean repository.
+The historical prefix-state branch reached `1222.8806` internally, but it is **competition-invalid** because hidden-test rows influenced peer-row features. It remains documented only in `docs/EXPERIMENT_HISTORY_NUMERICAL.md`.
 
 ## Repository layout
 
@@ -35,49 +35,64 @@ Bitaboost/
 │   ├── data.py
 │   ├── evaluation_metrics.py
 │   ├── utils.py
-│   └── baseline_legacy/   # frozen internal implementation; do not run directly
+│   └── baseline_legacy/   # frozen internal reproduction core
 └── requirements.txt
 ```
 
-## 1. Fresh environment
+## 1. Environment
 
-Use the actual Conda base path instead of assuming where Conda was installed:
+The current server already has Conda environments under `~/.conda/envs/`. A convenient clean environment is a clone of `test_trial`:
 
 ```bash
 cd ~/Aimers/Bitaboost
-
-CONDA_BASE="$(conda info --base)"
-conda create -p "$CONDA_BASE/envs/bitaboost" python=3.11 -y
-conda activate "$CONDA_BASE/envs/bitaboost"
-
+conda create -n bitaboost --clone test_trial
+conda activate bitaboost
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-Check the GPUs:
+Check the selected GPU:
 
 ```bash
-nvidia-smi -L
+nvidia-smi -i 2
 ```
+
+### GPU policy
+
+The project uses **one RTX 4090 only: physical GPU 2**.
+
+`GPU가 빵빵하다` means the selected 4090 has enough VRAM, not that training should span multiple GPUs. Keep the model on one GPU and use its VRAM aggressively. The wrappers therefore default to physical GPU `2`.
+
+Normal command:
+
+```bash
+python scripts/baseline_train.py --gpus 2
+```
+
+Equivalent explicit isolation:
+
+```bash
+CUDA_VISIBLE_DEVICES=2 python scripts/baseline_train.py --gpus 0
+```
+
+Do **not** use `--gpus all` for the normal Bitaboost workflow.
 
 ## 2. Data
 
-### Option A — reuse the existing local dataset
-
-If the old prepared dataset is still available:
+Reuse the existing prepared dataset:
 
 ```bash
 cd ~/Aimers/Bitaboost
 ln -s /home/kjw/Aimers/Tablatent_backup/data data
 ```
 
-Expected training cache:
+Expected cache:
 
 ```text
 data/processed/train.pkl
 ```
 
-### Option B — rebuild the training cache
+If the cache does not exist:
 
 ```bash
 python scripts/prepare_data.py
@@ -94,69 +109,66 @@ print(x.groupby('season')['control_success'].agg(['size','mean']))
 PY
 ```
 
-Expected total rows: approximately `1,475,092`, seasons `2019..2024`.
+Expected total rows are approximately `1,475,092`, covering seasons `2019..2024`.
 
-## 3. Reproduce the safe Codex baseline
+## 3. Reproduce the safe Codex maximum
 
-This is the first command to run in a clean environment:
+This is the first command to run after a clean setup:
 
 ```bash
-python scripts/baseline_train.py --gpus all
+python scripts/baseline_train.py --gpus 2
 ```
 
-Default behavior:
+The command:
 
-- detects every NVIDIA GPU with `nvidia-smi`;
-- exposes all detected GPUs to CatBoost;
-- passes all logical devices to every CatBoost fit (`0:1:2:...`);
-- allows CPU libraries to use all available CPU threads;
-- validates on 2024;
-- refits the selected model on all 2019-2024 rows;
-- builds the portable optimized package at `dist/baseline_SAFE.zip`;
-- verifies that the reproduced 2024 Brier is close to `0.247355098`.
+1. loads the official 2019-2024 training data;
+2. builds the frozen rule-safe feature/profile set;
+3. trains the decomposed CatBoost ensemble on GPU 2;
+4. evaluates the 2024 validation fold;
+5. refits on 2019-2024;
+6. creates `dist/baseline_SAFE.zip`;
+7. compares the reproduced metric with the reference `0.247355098`.
 
-Expected final line:
+Expected check:
 
 ```text
+reproduced Brier ≈ 0.247355098
+reproduced score ≈ 981.5
 BASELINE_OK
 ```
 
-Inspect the result without retraining:
+The exact reference is allowed a small tolerance because GPU CatBoost can exhibit tiny numerical variation.
+
+Inspect the package without retraining:
 
 ```bash
 python scripts/eval.py --zip dist/baseline_SAFE.zip
 ```
 
-### Optional final inference smoke test
-
-If `data/test.csv` and `data/sample_submission.csv` are present:
+If `data/test.csv` and `data/sample_submission.csv` are present, also run the final packaged inference smoke test:
 
 ```bash
-python scripts/baseline_train.py --gpus all --smoke
+python scripts/baseline_train.py --gpus 2 --smoke
 ```
-
-The smoke test runs the final packaged `script.py`, checks finite `[0,1]` probabilities, and therefore validates the actual submission artifact rather than only the training code.
 
 ## 4. Build the current-best submission directly
 
-`baseline_train.py` is the reference checker. The underlying build command is:
-
 ```bash
 python scripts/build_current_best_submission.py \
-  --gpus all \
+  --gpus 2 \
   --output dist/current_best_SAFE.zip
 ```
 
-For training/package generation without test-file smoke testing:
+Skip the final test-file smoke check when only retraining/package generation is required:
 
 ```bash
 python scripts/build_current_best_submission.py \
-  --gpus all \
+  --gpus 2 \
   --output dist/current_best_SAFE.zip \
   --skip-smoke
 ```
 
-The builder reproduces the frozen safe architecture:
+The frozen safe architecture is:
 
 ```text
 canonical/as-of/context features
@@ -171,54 +183,32 @@ joint auxiliary outcome
 R/F-specific convex ensemble
 ```
 
-The final ZIP is automatically converted away from pandas pickle history and then repacked using the previously validated portable/optimized submission path.
+The final ZIP is converted to the portable `csv.gz` history format and uses the optimized inference package.
 
 ## 5. New experiments
 
-Use one training entry point:
+`baseline_train.py` is the immutable reference checkpoint. Do not modify it when trying new ideas.
+
+Use:
 
 ```bash
-python scripts/train.py --gpus all --output dist/train_latest.zip
+python scripts/train.py --gpus 2 --output dist/train_latest.zip
 ```
 
-At the clean-restart checkpoint `train.py` intentionally aliases the frozen baseline. New modeling work should extend `src/` and then change `train.py`; **do not modify `baseline_train.py`**. This guarantees that the reference can always be rerun after experimental changes.
+At this clean-restart checkpoint, `train.py` aliases the frozen baseline. New work should be implemented in `src/` and exposed through `train.py` while keeping `baseline_train.py` unchanged.
 
-For a candidate that saves `y` and `pred` in NPZ:
+Evaluate an experiment that stores `y` and `pred` in an NPZ:
 
 ```bash
 python scripts/eval.py --npz outputs/my_experiment/validation_predictions.npz
 ```
 
-The evaluator reports Brier, raw competition-style score, target mean, delta versus the safe baseline, and R/F Brier when `game_type` is present.
+## 6. Experiment history
 
-## 6. GPU policy
-
-Training defaults to:
-
-```bash
---gpus all
-```
-
-Do not manually restrict to a single GPU for normal experimentation. The wrapper detects all physical GPUs and maps them to CatBoost logical devices. Example on a 4-GPU server:
-
-```text
-physical GPUs=['0','1','2','3'] -> CatBoost devices=0:1:2:3
-```
-
-If a machine has a broken/unavailable GPU, explicitly select the healthy devices:
-
-```bash
-python scripts/baseline_train.py --gpus 0,1,3
-```
-
-This is a recovery option, not the normal path.
-
-## 7. Experiment history
-
-Numerical history, rejected ideas, and rejection reasons are maintained in:
+All previous numerical attempts, rejected directions, and rejection reasons are recorded in:
 
 ```text
 docs/EXPERIMENT_HISTORY_NUMERICAL.md
 ```
 
-That document is the historical record. Old experiment runners should not be restored into `scripts/` just to preserve history.
+Old experiment runners should not be restored into `scripts/` just to preserve history.
