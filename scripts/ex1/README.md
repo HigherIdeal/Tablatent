@@ -1,58 +1,70 @@
-# EX1 — Reverse future-to-past expert
+# EX1 — Backward modeling experiments
 
-EX1 tests one hypothesis without retraining the SAFE982 forward predictor:
+EX1 isolates the future-to-past idea from the SAFE982 forward predictor.
 
-> Can the current row reconstruct a pitcher's previous-season trait, and does that reverse signal improve the frozen SAFE982 prediction?
+## EX1-A: row-level reverse expert
 
-## Isolation
+The first implementation asked whether current-row SAFE features could reconstruct the pitcher's previous-season profile and then blended the reconstructed success rate with SAFE982. The direct blend failed: both `structural` and `full` variants selected alpha 0. This result is retained as a negative control rather than promoted.
 
-- `bitaboost-stable` is not modified.
-- Experiment branch: `ex1-reverse-expert`.
-- Runner: `scripts/ex1/run_reverse_expert.py`.
-- Generated CatBoost models: `models/ex1/`.
-- Generated metrics/predictions: `outputs/experiments/ex1/`.
-- The forward control is read only from `outputs/baseline/predictions.npz`.
+Runner:
 
-## Reverse target
+```bash
+python scripts/ex1/run_reverse_expert.py \
+  --config experiments/configs/ex1_reverse_expert.yaml
+```
 
-For a row in season `s`, EX1 attaches a shrinkage profile computed from the same pitcher's season `s-1`:
+## EX1-B: pure pitcher-season backward reconstruction
 
-- control-success rate;
-- reverse rate;
-- middle rate;
-- ball rate;
-- strike rate.
+EX1-B removes SAFE982 completely and asks only whether a future pitcher-season state contains enough information to reconstruct the same pitcher's immediately previous-season state.
 
-The reverse CatBoost is trained on current-row features from 2020–2023 and these previous-season profiles. It is then applied row-by-row to 2024. Thus 2024 `control_success` is never a reverse-training label.
+Each pitcher-season is represented by exactly one row:
 
-Two variants are intentionally retained:
+```text
+Z(p, s) = [success, reverse, middle, ball, strike, log(pitch_count)]
+```
 
-1. `structural`: raw player/team IDs removed. This is the main scientific test.
-2. `full`: all SAFE rich features retained. This diagnoses how much improvement is merely identity reconstruction.
+The supervised task is:
 
-Each pitcher-season is approximately equally weighted so a high-volume pitcher does not dominate a repeated season-level reverse target.
+```text
+Z(p, s) -> [success, reverse, middle, ball, strike] of Z(p, s-1)
+```
 
-## Evaluation
+This fixes the main statistical weakness of EX1-A: season-level targets are no longer repeated once per pitch row.
 
-EX1 reports:
+### Variants
 
-- previous-season profile reconstruction MSE on 2024 rows;
-- reverse expert's standalone Brier;
-- frozen SAFE982 Brier;
-- fixed low-weight blends with SAFE982;
-- R/F-domain diagnostic blends;
-- correlation between the reverse correction direction and SAFE982 residual;
-- batch-vs-single-row prediction equality audit.
+- `state_only`: no player identity; tests temporal reversibility of the state itself.
+- `state_plus_id`: adds `pitcher_id`; diagnoses how much reconstruction comes from memorizing persistent player identity.
 
-The alpha sweep is diagnostic and uses 2024 labels only for evaluation/selection reporting. A positive result is not promoted automatically; it must survive a follow-up fold/reproduction test.
+### Rolling evaluation
 
-## Run
+The backward map is evaluated chronologically:
 
-The stable baseline prediction artifact must already exist. EX1 never regenerates it.
+```text
+test 2022 -> 2021 : train current-season pairs 2020-2021
+test 2023 -> 2022 : train current-season pairs 2020-2022
+test 2024 -> 2023 : train current-season pairs 2020-2023
+```
+
+Both current and previous seasons must satisfy the configured minimum pitch count. The default run checks thresholds 50 and 200.
+
+### Baselines and metrics
+
+No Brier/SOTA score is used because this experiment does not predict `control_success` for individual pitches. For each reconstructed state component it reports RMSE, MAE, Pearson and Spearman correlation. Three predictors are compared:
+
+1. learned CatBoost backward map;
+2. identity/persistence baseline: assume previous state equals future state;
+3. training-set mean profile.
+
+The critical diagnostic is whether the learned model beats the persistence baseline. If even raw persistence beats the mean strongly, the player trait is temporally reversible. If CatBoost additionally beats persistence across folds, a non-trivial backward mapping exists.
+
+### Run
 
 ```bash
 conda activate bitaboost
 cd ~/Aimers/Bitaboost
-python scripts/ex1/run_reverse_expert.py \
-  --config experiments/configs/ex1_reverse_expert.yaml
+python scripts/ex1/run_pitcher_season_backward.py \
+  --config experiments/configs/ex1_pitcher_season_backward.yaml
 ```
+
+Outputs are isolated under `outputs/experiments/ex1/pitcher_season_backward/`; final-fold model artifacts are stored under `models/ex1/`. Nothing in EX1-B loads, retrains, blends, or modifies SAFE982.
