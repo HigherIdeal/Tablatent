@@ -2,7 +2,7 @@
 
 Clean restart of the LG Aimers 9 baseball `control_success` project.
 
-The active workflow exposes only five scripts. Historical experiment code needed for exact baseline reproduction is frozen under `src/baseline_legacy/` and should not be executed directly.
+The active workflow exposes only five scripts. Historical experiment code required for exact baseline reproduction is frozen under `src/baseline_legacy/` and should not be executed directly.
 
 ## Reference baseline
 
@@ -14,7 +14,7 @@ Authoritative **rule-safe** reference:
 | internal score | **981.5** |
 | external leaderboard | **1098.86143** |
 
-The historical prefix-state branch reached `1222.8806` internally, but it is **competition-invalid** because hidden-test rows influenced peer-row features. It remains documented only in `docs/EXPERIMENT_HISTORY_NUMERICAL.md`.
+The historical prefix-state branch reached `1222.8806` internally, but it is competition-invalid because hidden-test rows influenced peer-row features. It remains documentation-only in `docs/EXPERIMENT_HISTORY_NUMERICAL.md`.
 
 ## Repository layout
 
@@ -35,159 +35,195 @@ Bitaboost/
 │   ├── data.py
 │   ├── evaluation_metrics.py
 │   ├── utils.py
-│   └── baseline_legacy/   # frozen internal reproduction core
+│   └── baseline_legacy/
 └── requirements.txt
 ```
 
-## 1. Environment
+## 1. Runtime environment
 
-Reference data/runtime versions are pinned:
+`bitaboost` is cloned from `test_trial` and is expected to match the competition/runtime environment:
 
 ```text
-Python      3.11
-NumPy       1.26.4
-pandas      2.2.3
-PyArrow     17.0.0
-CatBoost    1.2.10
+torch==2.7.1+cu128
+pandas==2.0.3
+numpy==1.26.4
+scipy==1.15.3
+scikit-learn==1.8.0
+joblib==1.5.3
+threadpoolctl==3.6.0
+narwhals==2.21.2
+transformers==4.46.3
+accelerate==1.9.0
+sentencepiece==0.1.99
+regex==2023.12.25
+tqdm==4.66.4
+loguru==0.7.2
+pyyaml==6.0.1
+rich==13.7.1
 ```
 
-Existing environment:
+Only the library missing from the competition environment is listed in this repository:
+
+```text
+catboost==1.2.10
+```
+
+Install only that extra dependency:
 
 ```bash
 cd ~/Aimers/Bitaboost
 conda activate bitaboost
-python -m pip install --upgrade -r requirements.txt
+pip install -r requirements.txt
 ```
 
-Verify:
+Do **not** run a broad `pip install --upgrade ...` over the competition packages. The baseline preflight deliberately checks the important versions before training.
 
-```bash
-python - <<'PY'
-import numpy, pandas, pyarrow, catboost
-print('numpy   ', numpy.__version__)
-print('pandas  ', pandas.__version__)
-print('pyarrow ', pyarrow.__version__)
-print('catboost', catboost.__version__)
-PY
-```
+## 2. GPU policy
 
-Expected NumPy version is exactly `1.26.4`.
-
-### GPU policy
-
-The project uses **one RTX 4090 only: physical GPU 2**. The point is to use the large VRAM of one 4090, not multi-GPU training.
+Use **one RTX 4090: physical GPU 2**. The goal is to exploit the VRAM of one 4090, not multi-GPU training.
 
 Recommended shell setting:
 
 ```bash
-echo 'export CUDA_VISIBLE_DEVICES=2' >> ~/.bashrc
-source ~/.bashrc
+export CUDA_VISIBLE_DEVICES=2
 ```
 
-After that physical GPU 2 appears to CUDA programs as logical GPU `0`.
+The wrappers also default to physical GPU 2, so the normal training command needs no GPU argument:
 
-The Bitaboost wrappers also default to physical GPU 2, so the normal baseline command needs no GPU option.
+```bash
+python scripts/baseline_train.py
+```
 
-## 2. Data cache: Parquet only
-
-Bitaboost does **not** read `train.pkl`. Pickle caches are intentionally ignored because NumPy/Pandas module paths can change across versions (`numpy._core.numeric` vs `numpy.core.numeric`).
-
-Processed training data is:
+Expected mapping:
 
 ```text
-data/processed/train.parquet
+[parallel] physical GPUs=['2'] -> CatBoost devices=0
 ```
 
-Format:
+## 3. Data cache
+
+The processed cache is intentionally **not pickle and not Parquet**.
 
 ```text
-Parquet + PyArrow + Zstandard
+data/processed/train.csv.gz
 ```
 
-If reusing the old data directory:
+Why `csv.gz`:
+
+- no NumPy pickle module-path compatibility problem;
+- no `pyarrow`/`fastparquet` dependency;
+- works with the existing pandas 2.0.3 runtime;
+- keeps `requirements.txt` limited to CatBoost.
+
+If the existing official data directory is reused:
 
 ```bash
 cd ~/Aimers/Bitaboost
 ln -s /home/kjw/Aimers/Tablatent_backup/data data
 ```
 
-If `data` already exists, do not recreate the symlink.
+`prepare_data.py` searches `data/` for the official training CSV containing `control_success`, preferring `data/train.csv` and `data/raw/extracted/train.csv`.
 
-### Build the Parquet cache
-
-```bash
-python scripts/prepare_data.py
-```
-
-The script first reuses an already extracted `train.csv` when possible. If unavailable, it downloads/extracts the official dataset. An old `train.pkl` may remain on disk but is ignored.
-
-Force a full rebuild only when necessary:
+Build or refresh the portable cache:
 
 ```bash
 python scripts/prepare_data.py --force
 ```
 
-Sanity check:
+Check it:
 
 ```bash
 python - <<'PY'
 import pandas as pd
-x = pd.read_parquet('data/processed/train.parquet')
-print(x.shape)
-print(x.groupby('season')['control_success'].agg(['size','mean']))
+x = pd.read_csv('data/processed/train.csv.gz', compression='gzip', low_memory=False)
+print('shape:', x.shape)
+print(x.groupby('season')['control_success'].agg(['size', 'mean']))
 PY
 ```
 
-Expected total rows are approximately `1,475,092`, covering seasons `2019..2024`.
+Expected total rows: about `1,475,092`, seasons `2019..2024`.
 
-## 3. Reproduce the safe Codex maximum
+## 4. Baseline validation — first command before experiments
 
-After `train.parquet` exists:
+### Step A: confirm environment + install CatBoost
+
+```bash
+conda activate bitaboost
+cd ~/Aimers/Bitaboost
+pip install -r requirements.txt
+```
+
+Optional manual version check:
+
+```bash
+python - <<'PY'
+import numpy, pandas, scipy, sklearn, torch, catboost
+print('numpy   ', numpy.__version__)
+print('pandas  ', pandas.__version__)
+print('scipy   ', scipy.__version__)
+print('sklearn ', sklearn.__version__)
+print('torch   ', torch.__version__)
+print('catboost', catboost.__version__)
+PY
+```
+
+### Step B: build the cache
+
+```bash
+python scripts/prepare_data.py --force
+```
+
+### Step C: reproduce the Codex SAFE maximum
 
 ```bash
 python scripts/baseline_train.py
 ```
 
-The command:
+At startup the script prints the runtime fingerprint. Critical mismatches in NumPy, pandas, SciPy, scikit-learn, Torch, or CatBoost stop the run before expensive training.
 
-1. loads the official 2019-2024 Parquet cache;
-2. builds the frozen rule-safe feature/profile set;
-3. trains the decomposed CatBoost ensemble on the single RTX 4090;
-4. evaluates the 2024 validation fold;
-5. refits on 2019-2024;
-6. creates `dist/baseline_SAFE.zip`;
-7. compares the reproduced metric with `0.247355098`.
-
-Expected check:
+Expected end-of-run check:
 
 ```text
-reproduced Brier ≈ 0.247355098
-reproduced score ≈ 981.5
+=== BASELINE CHECK ===
+reproduced Brier : ~0.247355098
+reference Brier  : 0.247355098
+reproduced score : ~981.5
+external LB ref  : 1098.86143
 BASELINE_OK
 ```
 
-Tiny GPU CatBoost numerical variation is allowed by the checker tolerance.
+GPU CatBoost can show tiny numerical variation, so the checker uses a small tolerance.
 
-Inspect the package without retraining:
+If you intentionally want to inspect a slightly different runtime without hard failure:
+
+```bash
+python scripts/baseline_train.py --no-strict-env
+```
+
+Do not treat such a run as the canonical reproduction until the difference is explained.
+
+## 5. Inspect a reproduced package
+
+Without retraining:
 
 ```bash
 python scripts/eval.py --zip dist/baseline_SAFE.zip
 ```
 
-If `data/test.csv` and `data/sample_submission.csv` are present, run the final packaged inference smoke test:
+If `data/test.csv` and `data/sample_submission.csv` are present, validate the actual packaged inference path too:
 
 ```bash
 python scripts/baseline_train.py --smoke
 ```
 
-## 4. Build the current-best submission directly
+## 6. Build current-best submission directly
 
 ```bash
 python scripts/build_current_best_submission.py \
   --output dist/current_best_SAFE.zip
 ```
 
-Skip the final test-file smoke check when only retraining/package generation is required:
+Skip final test-file smoke checking:
 
 ```bash
 python scripts/build_current_best_submission.py \
@@ -195,7 +231,7 @@ python scripts/build_current_best_submission.py \
   --skip-smoke
 ```
 
-The frozen safe architecture is:
+The safe architecture is the frozen decomposed CatBoost ensemble:
 
 ```text
 canonical/as-of/context features
@@ -210,40 +246,23 @@ joint auxiliary outcome
 R/F-specific convex ensemble
 ```
 
-The final ZIP uses portable `csv.gz` history artifacts; no pickle history remains in the final submission package.
+## 7. New experiments
 
-## 5. New experiments
-
-`baseline_train.py` is the immutable reference checkpoint. Do not modify it when trying new ideas.
-
-Use:
+`baseline_train.py` is the immutable reference checkpoint. New ideas go through:
 
 ```bash
 python scripts/train.py --output dist/train_latest.zip
 ```
 
-At this clean-restart checkpoint, `train.py` aliases the frozen baseline. New work should be implemented in `src/` and exposed through `train.py` while keeping `baseline_train.py` unchanged.
+At the clean-restart checkpoint `train.py` aliases the frozen baseline. Future modeling code should be added under `src/` and exposed through `train.py`; do not modify the baseline checkpoint merely to test an idea.
 
-Evaluate an experiment that stores `y` and `pred` in an NPZ:
+For NPZ validation predictions containing `y` and `pred`:
 
 ```bash
 python scripts/eval.py --npz outputs/my_experiment/validation_predictions.npz
 ```
 
-## 6. Fresh-pull recovery path
-
-```bash
-cd ~/Aimers/Bitaboost
-git pull
-conda activate bitaboost
-python -m pip install --upgrade -r requirements.txt
-python scripts/prepare_data.py
-python scripts/baseline_train.py
-```
-
-If baseline reproduction is outside tolerance, do not start a new experiment until the environment/data difference is explained.
-
-## 7. Experiment history
+## 8. Experiment history
 
 All previous numerical attempts, rejected directions, and rejection reasons are recorded in:
 
