@@ -21,10 +21,16 @@ def closed_form_domain_blend(y, direct, logic, gt):
 
 
 def fit_simplex(y, matrix, initial=None):
+    """Historical R/F simplex optimizer used to create the SAFE artifact."""
     y = np.asarray(y, np.float64); matrix = np.asarray(matrix, np.float64); k = matrix.shape[1]
     x0 = np.full(k, 1.0/k) if initial is None else np.asarray(initial, np.float64)
     x0 = np.clip(x0, 0, 1); x0 /= x0.sum()
-    res = minimize(lambda w: float(np.mean((matrix @ w - y) ** 2)), x0, method="SLSQP", bounds=[(0.,1.)]*k, constraints={"type":"eq","fun":lambda w: float(np.sum(w)-1.)}, options={"ftol":1e-15,"maxiter":2000})
+    a = matrix.T @ matrix / len(y); v = matrix.T @ y / len(y)
+    fun = lambda w: float(w @ a @ w - 2.0 * w @ v)
+    jac = lambda w: 2.0 * a @ w - 2.0 * v
+    res = minimize(fun, x0, jac=jac, method="SLSQP", bounds=[(0.,1.)]*k,
+                   constraints={"type":"eq","fun":lambda w: float(np.sum(w)-1.),"jac":lambda w: np.ones_like(w)},
+                   options={"ftol":1e-15,"maxiter":2000})
     if not res.success or not np.isfinite(res.x).all():
         raise RuntimeError(f"simplex optimization failed: {res.message}")
     w = np.clip(np.asarray(res.x, np.float64), 0, 1); w /= w.sum(); return w
