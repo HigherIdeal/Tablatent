@@ -77,6 +77,8 @@ def main() -> None:
     ap.add_argument("--iterations", type=int, default=600)
     ap.add_argument("--joint-class", action="store_true")
     ap.add_argument("--joint-success", action="store_true")
+    ap.add_argument("--season-basis", action="store_true")
+    ap.add_argument("--context-lattice", action="store_true")
     args = ap.parse_args()
     from catboost import CatBoostClassifier, CatBoostRegressor, Pool
     config = load_config(ROOT / "configs/default.yaml")
@@ -88,6 +90,8 @@ def main() -> None:
         anchor_core.add_frozen_anchor_features(frame, season_col=season, pitcher_col="pitcher_id", n_col="asof_pitcher_n", count_tolerance=.05)
     banchor = offset_core.add_batter_anchor(frame) if args.batter_anchor else []
     across = offset_core.add_anchor_cross(frame) if args.anchor_cross else []
+    season_basis = offset_core.add_rowlocal_season_basis(frame) if args.season_basis else []
+    context_lattice = offset_core.add_frozen_context_lattice(frame) if args.context_lattice else []
     matchup = offset_core.add_frozen_matchup(frame) if args.matchup else []
     count_profile = offset_core.add_frozen_count_profiles(frame) if args.count_profile else []
     pressure_profile = offset_core.add_frozen_pressure_profiles(frame) if args.pressure_profile else []
@@ -117,6 +121,8 @@ def main() -> None:
         features += [x for short in ("reverse", "middle", "ball", "strike") for x in (f"eng_anchor_{short}_rate", f"eng_since_anchor_{short}_rate", f"eng_since_anchor_{short}_minus_long")]
     features += banchor
     features += across
+    features += season_basis
+    features += context_lattice
     features += matchup
     features += count_profile
     features += pressure_profile
@@ -157,7 +163,7 @@ def main() -> None:
     )
     model.fit(pool)
     y = valid[target].to_numpy(float)
-    out = ROOT / f"outputs/{'joint_success' if args.joint_success else 'joint_outcome' if args.joint_class else 'multitask_outcome_boosting'}_d{args.depth}_r{args.success_repeats}_{'-'.join(aux_names)}_f{args.fold}_s{args.seed}_fw{args.f_weight:g}{'_anchor' if args.anchor else ''}{'_multi' if args.multi_anchor else ''}{'_banchor' if args.batter_anchor else ''}{'_cross4' if args.anchor_cross else ''}{'_match' if args.matchup else ''}{'_count' if args.count_profile else ''}{'_pressure' if args.pressure_profile else ''}{'_opp' if args.opponent_profile else ''}{'_domain' if args.domain_profile else ''}{'_pair' if args.pair_profile else ''}{'_lev' if args.leverage_profile else ''}{'_form' if args.anchor_form else ''}{'_arsenal' if args.arsenal_context else ''}{f'_auxprof_{args.aux_profile_extra}' if args.aux_profile else ''}_i{args.iterations}"
+    out = ROOT / f"outputs/{'joint_success' if args.joint_success else 'joint_outcome' if args.joint_class else 'multitask_outcome_boosting'}_d{args.depth}_r{args.success_repeats}_{'-'.join(aux_names)}_f{args.fold}_s{args.seed}_fw{args.f_weight:g}{'_anchor' if args.anchor else ''}{'_multi' if args.multi_anchor else ''}{'_banchor' if args.batter_anchor else ''}{'_cross4' if args.anchor_cross else ''}{'_sbasis' if args.season_basis else ''}{'_lattice' if args.context_lattice else ''}{'_match' if args.matchup else ''}{'_count' if args.count_profile else ''}{'_pressure' if args.pressure_profile else ''}{'_opp' if args.opponent_profile else ''}{'_domain' if args.domain_profile else ''}{'_pair' if args.pair_profile else ''}{'_lev' if args.leverage_profile else ''}{'_form' if args.anchor_form else ''}{'_arsenal' if args.arsenal_context else ''}{f'_auxprof_{args.aux_profile_extra}' if args.aux_profile else ''}_i{args.iterations}"
     out.mkdir(parents=True, exist_ok=True)
     rows, saved = {"y": y, "gt": valid.game_type.astype(str).to_numpy()}.copy(), None
     metric_rows = []

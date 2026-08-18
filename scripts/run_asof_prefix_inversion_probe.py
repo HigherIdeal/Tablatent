@@ -27,11 +27,15 @@ PREFIX_RATES = {
 }
 SUCCESS_WINDOWS = (3, 5, 10, 20)
 AUX_WINDOWS = (5, 20)
+EXTRA_SUCCESS_WINDOWS = (2, 30, 50)
+EXTRA_AUX_WINDOWS = (3, 10, 50)
 VARIANTS = (
     "A0_REGIME",
     "A1_PREV1_SUCCESS",
     "A2_PITCH_SUCCESS_STATE",
     "A3_MULTI_PREFIX_STATE",
+    "A4_MULTI_SCALE_STATE",
+    "A5_SEQUENCE_STATE",
 )
 
 
@@ -118,6 +122,13 @@ def add_prefix_inversion_features(
         diagnostics[f"{short}_recon_rows"] = int(valid.sum())
         diagnostics[f"{short}_recon_share"] = float(valid.mean())
 
+    for short in PREFIX_RATES:
+        source = f"eng_prev_pitch_{short}_recon"
+        for lag in (2, 3, 4, 5):
+            work[f"eng_pitch_{short}_lag{lag}"] = work[source].groupby(
+                [work[pitcher_col], work["_segment"]], sort=False
+            ).shift(lag - 1).astype(np.float32)
+
     # Pitch-level recent success state. For row t, eng_prev_pitch_success_recon is
     # the outcome of t-1; rolling windows ending at t therefore use only pitches
     # strictly before the row being predicted.
@@ -132,6 +143,11 @@ def add_prefix_inversion_features(
             .mean()
             .reset_index(level=[0, 1], drop=True)
             .astype(np.float32)
+        )
+    for window in EXTRA_SUCCESS_WINDOWS:
+        work[f"eng_pitch_success_last{window}"] = (
+            work[success_name].groupby(seg_keys, sort=False).rolling(window, min_periods=1)
+            .mean().reset_index(level=[0, 1], drop=True).astype(np.float32)
         )
 
     # Relative-to-long features give shallow trees a direct local-vs-career state.
@@ -153,6 +169,11 @@ def add_prefix_inversion_features(
                 .mean()
                 .reset_index(level=[0, 1], drop=True)
                 .astype(np.float32)
+            )
+        for window in EXTRA_AUX_WINDOWS:
+            work[f"eng_pitch_{short}_last{window}"] = (
+                work[source].groupby(seg_keys, sort=False).rolling(window, min_periods=1)
+                .mean().reset_index(level=[0, 1], drop=True).astype(np.float32)
             )
 
     new_columns = [c for c in work.columns if c.startswith("eng_prev_pitch_") or c.startswith("eng_pitch_")]
@@ -233,6 +254,17 @@ def feature_sets(base_features: list[str]) -> dict[str, list[str]]:
         "A1_PREV1_SUCCESS": prev1,
         "A2_PITCH_SUCCESS_STATE": success_state,
         "A3_MULTI_PREFIX_STATE": multi,
+        "A4_MULTI_SCALE_STATE": [
+            *multi,
+            *[f"eng_pitch_success_last{w}" for w in EXTRA_SUCCESS_WINDOWS],
+            *[f"eng_pitch_{state}_last{window}" for state in ("reverse", "middle", "ball", "strike") for window in EXTRA_AUX_WINDOWS],
+        ],
+        "A5_SEQUENCE_STATE": [
+            *multi,
+            *[f"eng_pitch_success_last{w}" for w in EXTRA_SUCCESS_WINDOWS],
+            *[f"eng_pitch_{state}_last{window}" for state in ("reverse", "middle", "ball", "strike") for window in EXTRA_AUX_WINDOWS],
+            *[f"eng_pitch_{state}_lag{lag}" for state in PREFIX_RATES for lag in (2, 3, 4, 5)],
+        ],
     }
     for name, features in out.items():
         if len(features) != len(set(features)):
@@ -251,6 +283,9 @@ def main() -> None:
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--folds", default="2022,2023,2024")
     parser.add_argument("--iterations", type=int, default=400)
+    parser.add_argument("--depth", type=int, default=6)
+    parser.add_argument("--variants", default=",".join(VARIANTS))
+    parser.add_argument("--objective", choices=["logloss", "brier"], default="logloss")
     parser.add_argument("--regime-start-year", type=int, default=2023)
     parser.add_argument("--count-tolerance", type=float, default=0.05)
     parser.add_argument("--task-type", choices=["CPU", "GPU"], default="GPU")
@@ -259,6 +294,9 @@ def main() -> None:
     parser.add_argument("--pinned-memory-size", default="4GB")
     parser.add_argument("--output-dir", default="outputs/asof_prefix_inversion_probe")
     args = parser.parse_args()
+    selected_variants = tuple(x.strip() for x in args.variants.split(",") if x.strip())
+    if not selected_variants or not set(selected_variants) <= set(VARIANTS):
+        raise ValueError(f"bad --variants: {selected_variants}")
 
     try:
         import catboost
@@ -319,6 +357,8 @@ def main() -> None:
         gpu_ram_part=args.gpu_ram_part,
         pinned_memory_size=args.pinned_memory_size,
     )
+    params["depth"] = args.depth
+    params["_regression"] = args.objective == "brier"
 
     output_dir = (ROOT / args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -341,7 +381,7 @@ def main() -> None:
 
     rows: list[dict] = []
     predictions_2024: dict[str, np.ndarray] = {}
-    total_models = len(folds) * len(VARIANTS)
+    total_models = len(folds) * len(selected_variants)
     progress = tqdm(total=total_models, desc="prefix inversion models", unit="model", dynamic_ncols=True)
 
     for val_year in folds:
@@ -354,7 +394,7 @@ def main() -> None:
         recon_available = valid["eng_prev_pitch_success_recon"].notna().to_numpy()
 
         fold_predictions: dict[str, np.ndarray] = {}
-        for variant in VARIANTS:
+        for variant in selected_variants:
             seed_everything(seed)
             pred = regime_core.fit_predict(
                 train=train,
@@ -402,8 +442,9 @@ def main() -> None:
                     }
                 )
 
-        if val_year == 2024:
-            predictions_2024 = fold_predictions
+        if True:
+            if val_year == 2024:
+                predictions_2024 = fold_predictions
             pred_frame = pd.DataFrame(
                 {
                     "target": y_valid,
@@ -414,7 +455,7 @@ def main() -> None:
             )
             if row_id_col in valid.columns:
                 pred_frame.insert(0, row_id_col, valid[row_id_col].to_numpy())
-            pred_frame.to_csv(output_dir / "validation_2024_predictions.csv", index=False)
+            pred_frame.to_csv(output_dir / f"validation_{val_year}_predictions.csv", index=False)
 
         del train, valid, y_valid, fold_predictions
         gc.collect()
@@ -451,6 +492,7 @@ def main() -> None:
             "variants": variants,
             "inversion_diagnostics": inversion_diag,
             "iterations": int(args.iterations),
+            "depth": int(args.depth),
             "task_type": args.task_type,
             "devices": args.devices if args.task_type == "GPU" else None,
             "gpu_ram_part": float(args.gpu_ram_part) if args.task_type == "GPU" else None,

@@ -133,7 +133,7 @@ def fit_predict(
     extra_categorical: set[str],
     params: dict,
 ) -> np.ndarray:
-    from catboost import CatBoostClassifier, Pool
+    from catboost import CatBoostClassifier, CatBoostRegressor, Pool
 
     x_train, categorical = prepare_x(
         train,
@@ -164,9 +164,15 @@ def fit_predict(
         feature_names=features,
     )
 
-    model = CatBoostClassifier(**params)
+    params = dict(params)
+    regression = bool(params.pop("_regression", False))
+    if regression:
+        params["loss_function"] = "RMSE"
+        params.pop("eval_metric", None)
+    model = (CatBoostRegressor if regression else CatBoostClassifier)(**params)
     model.fit(train_pool, verbose=False)
-    pred = np.asarray(model.predict_proba(valid_pool)[:, 1], dtype=np.float64)
+    pred = np.asarray(model.predict(valid_pool) if regression else model.predict_proba(valid_pool)[:, 1], dtype=np.float64)
+    pred = np.clip(pred, 0.0, 1.0)
 
     del model, train_pool, valid_pool, x_train, x_valid, y_train, y_valid
     gc.collect()

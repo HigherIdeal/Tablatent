@@ -9,3 +9,13 @@ dist/
 __pycache__/
 *.py[cod]
 .ipynb_checkpoints/
+models/Qwen3-1.7B/
+
+# Generated experiment artifacts
+outputs/
+
+# Submission/build packages
+dist/
+
+# Local pretrained models
+models/

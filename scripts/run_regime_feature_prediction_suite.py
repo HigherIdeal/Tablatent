@@ -35,6 +35,7 @@ RANGE_CONT = ["rr_recent_range", "ro_recent_range"]
 FAST_CAT = "regime_r_fastball_hand_q6"
 RANGE_CAT = "regime_r_recent_range_q6"
 EXTRA_CATEGORICAL = {FAST_CAT, RANGE_CAT}
+EXTRA_CATEGORICAL.update(context_core.INTERACTION_COLUMNS)
 
 
 @dataclass(frozen=True)
@@ -96,6 +97,24 @@ VARIANTS: tuple[VariantSpec, ...] = (
         "full",
         tuple([RECENT_FLAG] + FAST_CONT + RANGE_CONT + [FAST_CAT, RANGE_CAT]),
         "all history plus continuous and categorical representations of both mechanisms",
+    ),
+    VariantSpec(
+        "full_both_cont_count_hand",
+        "full",
+        tuple([RECENT_FLAG] + FAST_CONT + RANGE_CONT + ["ctx_count_hand"]),
+        "best continuous regime candidate plus count x hand context",
+    ),
+    VariantSpec(
+        "full_both_cont_count_base",
+        "full",
+        tuple([RECENT_FLAG] + FAST_CONT + RANGE_CONT + ["ctx_count_base"]),
+        "best continuous regime candidate plus count x base-state context",
+    ),
+    VariantSpec(
+        "full_both_cont_context",
+        "full",
+        tuple([RECENT_FLAG] + FAST_CONT + RANGE_CONT + context_core.INTERACTION_COLUMNS),
+        "best continuous regime candidate plus the compact target-free context crosses",
     ),
 )
 VARIANT_LOOKUP = {spec.name: spec for spec in VARIANTS}
@@ -495,6 +514,7 @@ def main() -> None:
     row_id_col = config["data"].get("row_id_col", "row_id")
 
     frame, invariant_check = recent_core.prepare_frame(config)
+    context_core.add_context_interactions(frame)
     sort_cols = [season_col, "game_month"]
     if row_id_col in frame.columns:
         sort_cols.append(row_id_col)
