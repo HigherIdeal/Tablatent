@@ -1,0 +1,39 @@
+experiment:
+  id: ex1
+  name: reverse_future_to_past
+  hypothesis: >-
+    A model trained to reconstruct a pitcher's previous-season trait from a current row
+    contains complementary information to the frozen SAFE982 forward prediction.
+
+# SAFE982 remains an immutable control. EX1 only reads its saved 2024 prediction vector.
+baseline_config: configs/baseline_safe_981.yaml
+baseline_predictions: outputs/baseline/predictions.npz
+
+output_dir: outputs/experiments/ex1
+model_dir: models/ex1
+pitcher_col: pitcher_id
+feature_set: rich
+
+# A row from season s receives a target built only from the same pitcher's season s-1.
+# 2024 is never used to fit the reverse model.
+train_seasons: [2020, 2021, 2022, 2023]
+profile:
+  prior_strength: 50.0
+  min_prior_rows: 1
+
+# structural removes raw identity IDs to test whether the reverse signal is genuine
+# state information; full is the valid but potentially identity-driven counterpart.
+variants: [structural, full]
+reverse_model:
+  iterations: 600
+  depth: 8
+  learning_rate: 0.03
+  l2_leaf_reg: 20.0
+  random_strength: 0.5
+  random_seed: 42
+  equal_pitcher_season_weight: true
+
+# These blends are diagnostics only. No new forward model is fitted.
+# alpha=0 is exactly the frozen SAFE982 prediction.
+blend_alpha_grid: [0.0, 0.02, 0.05, 0.08, 0.10, 0.15, 0.20, 0.30]
+independence_audit_rows: 16
