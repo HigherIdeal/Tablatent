@@ -86,3 +86,35 @@ Outputs:
 outputs/experiments/ex3/four_state_backward_energy/
 models/ex3/
 ```
+
+## Counterfactual strength sweep
+
+The first EX3 run collapsed near AUC 0.5 and near-uniform four-state mass. A likely reason is scale mismatch: a literal one-pitch update moves a veteran's cumulative state by only O(1/n), while season-level backward reconstruction error is much larger.
+
+The strength sweep tests that hypothesis without increasing model capacity. Each fold trains exactly one backward model on the realized one-pitch state (`w=1`). That frozen model is then evaluated under hard-state pseudo-count strengths:
+
+```text
+lambda = 1, 5, 20, 50, 100
+```
+
+Soft states use `0.35 * lambda`. `lambda` is a diagnostic latent-evidence strength, not a claim that 20 or 100 future pitches actually occurred. The sweep changes only the row-local counterfactual displacement.
+
+Primary interpretation:
+
+- if AUC rises materially above 0.5 as `lambda` grows, backward geometry contains outcome direction but the original perturbation was too weak;
+- if AUC remains near 0.5 even when the displacement becomes comparable with backward noise, season-level backward state is not informative enough for individual-pitch outcome discrimination under this construction.
+
+AUC is the primary scale probe because it is invariant to temperature. Brier is retained as a secondary diagnostic and each lambda is calibrated only from earlier held-out folds.
+
+Run:
+
+```bash
+python scripts/ex3/run_strength_sweep.py \
+  --config experiments/configs/ex3_counterfactual_strength_sweep.yaml
+```
+
+Output:
+
+```text
+outputs/experiments/ex3/counterfactual_strength_sweep/metrics_counterfactual_strength_sweep.json
+```
