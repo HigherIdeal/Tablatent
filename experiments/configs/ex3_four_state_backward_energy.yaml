@@ -1,0 +1,56 @@
+experiment: ex3_four_state_backward_energy
+baseline_config: configs/baseline_safe_981.yaml
+
+output_dir: outputs/experiments/ex3/four_state_backward_energy
+model_dir: models/ex3
+pitcher_col: pitcher_id
+
+# EX3 remains independent from SAFE982 / any forward success classifier.
+# Four latent counterfactual states are generated only by state assimilation:
+#   F_hard: y=0, full one-pitch evidence
+#   F_soft: y=0, fractional one-pitch evidence
+#   S_soft: y=1, fractional one-pitch evidence
+#   S_hard: y=1, full one-pitch evidence
+variants:
+  - state_only
+  - context_state
+
+fold_seasons:
+  - 2022
+  - 2023
+  - 2024
+
+min_past_pitch_count: 200
+
+# Soft states represent a lower-confidence assimilation of the same observed event.
+soft_event_weight: 0.35
+
+# Failure has an unobserved middle/non-middle substate at inference.
+# It is marginalized using P(middle=1 | failure) estimated only from each fold's train rows.
+failure_middle_prior_floor: 0.02
+failure_middle_prior_ceiling: 0.98
+substate_temperature: 1.0
+
+# Four-state energy temperature is selected only from earlier held-out folds.
+temperature_grid:
+  - 0.125
+  - 0.25
+  - 0.5
+  - 1.0
+  - 2.0
+  - 4.0
+  - 8.0
+  - 16.0
+
+energy_sigma_floor: 0.01
+independence_audit_rows: 8
+
+catboost:
+  iterations: 350
+  learning_rate: 0.04
+  depth: 6
+  l2_leaf_reg: 12.0
+  random_strength: 0.5
+  bootstrap_type: Bayesian
+  bagging_temperature: 0.5
+  random_seed: 42
