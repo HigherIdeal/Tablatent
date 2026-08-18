@@ -16,14 +16,37 @@ def load_config(path: str | Path) -> dict:
 def seed_everything(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
+    # The active Bitaboost baseline is CatBoost-only. Torch is optional so a clean
+    # baseline environment does not need a large PyTorch install just for seeding.
     try:
         import torch
-        torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
-            torch.backends.cudnn.benchmark = True
     except ImportError:
-        pass
+        return
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.benchmark = True
+
+
+def device():
+    try:
+        import torch
+    except ImportError as exc:
+        raise RuntimeError("PyTorch is not installed; device() is only for optional neural experiments") from exc
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def ensure_output_dirs(output_dir: str | Path) -> dict[str, Path]:
+    root = Path(output_dir)
+    result = {
+        "root": root,
+        "checkpoints": root / "checkpoints",
+        "latents": root / "latents",
+        "logs": root / "logs",
+    }
+    for path in result.values():
+        path.mkdir(parents=True, exist_ok=True)
+    return result
 
 
 def save_json(obj, path: str | Path) -> None:
@@ -41,4 +64,5 @@ def save_json(obj, path: str | Path) -> None:
             return x.tolist()
         raise TypeError(type(x).__name__)
 
-    path.write_text(json.dumps(obj, ensure_ascii=False, indent=2, default=convert) + "\n", encoding="utf-8")
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2, default=convert)
