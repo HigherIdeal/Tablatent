@@ -1,0 +1,35 @@
+experiment: ex1_pitcher_season_backward
+baseline_config: configs/baseline_safe_981.yaml
+
+output_dir: outputs/experiments/ex1/pitcher_season_backward
+model_dir: models/ex1
+pitcher_col: pitcher_id
+
+# Pure backward reconstruction only. SAFE982 predictions are not loaded or blended.
+variants:
+  - state_only
+  - state_plus_id
+
+# Require both current and previous seasons to have at least this many pitches.
+# Two thresholds provide a low-cost robustness check against noisy short seasons.
+min_pitch_thresholds:
+  - 50
+  - 200
+
+# Rolling backward generalization:
+# train on all earlier current-season pairs, then reconstruct the prior state
+# for pitchers appearing in the held-out current season.
+fold_seasons:
+  - 2022
+  - 2023
+  - 2024
+
+catboost:
+  iterations: 400
+  learning_rate: 0.03
+  depth: 4
+  l2_leaf_reg: 10.0
+  random_strength: 0.5
+  bootstrap_type: Bayesian
+  bagging_temperature: 0.5
+  random_seed: 42
