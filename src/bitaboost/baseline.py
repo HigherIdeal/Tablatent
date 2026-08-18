@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import gc, json, time
-from pathlib import Path
 import numpy as np
 import pandas as pd
 
 from .config import resolve_path
 from .ensemble import build_final, build_mixed, build_safe_core
-from .features import AUX_NAMES, prepare
+from .features import AUX_NAMES, auxiliary_targets, prepare
 from .legacy import activate
 from .metrics import brier, summary
 from .runtime import log, stage
@@ -48,20 +47,28 @@ def _offset_prior(frame,mean):
 
 def train(cfg):
     from catboost import CatBoostClassifier,CatBoostRegressor,Pool
-    out=resolve_path(cfg,cfg["output"]["dir"]); out.mkdir(parents=True,exist_ok=True); save_models=bool(cfg["output"].get("save_models",False)); data=prepare(cfg); frame=data.frame; tr=frame.loc[data.train_mask].reset_index(drop=True); va=frame.loc[data.valid_mask].reset_index(drop=True); aux=data.aux.loc[data.train_mask].reset_index(drop=True); y=data.y_valid; gt=data.gt_valid; comp={}; timing={}
+    out=resolve_path(cfg,cfg["output"]["dir"]); out.mkdir(parents=True,exist_ok=True); save_models=bool(cfg["output"].get("save_models",False)); data=prepare(cfg); frame=data.frame; tr=frame.loc[data.train_mask].reset_index(drop=True); va=frame.loc[data.valid_mask].reset_index(drop=True)
+    # The recovered lineage used two auxiliary-target scopes. Frozen profiles and
+    # independent reverse/middle heads used the full-frame reconstruction, while
+    # direct/joint/hurdle/structured heads recomputed targets on train-only rows.
+    aux_full_tr=data.aux.loc[data.train_mask].reset_index(drop=True); aux_train=auxiliary_targets(tr)
+    y=data.y_valid; gt=data.gt_valid; comp={}; timing={}
 
     t=time.perf_counter()
     with stage("rich models: direct + aux heads + joint"):
-        x,cats=_prepare_x(tr,data.feature_sets["rich"]); xv,_=_prepare_x(va,data.feature_sets["rich"]); vp=Pool(xv,cat_features=cats,feature_names=data.feature_sets["rich"]); keep=aux[list(AUX_NAMES)].notna().all(axis=1).to_numpy(); success=tr.loc[keep,"control_success"].to_numpy(np.float32); av=aux.loc[keep,list(AUX_NAMES)].to_numpy(np.float32)
-        repeats=int(cfg["recipe"]["direct"]["success_repeats"]); labels=np.column_stack([*[success]*repeats,av]); fw=float(cfg["recipe"]["direct"]["f_weight"]); w=np.where(tr.loc[keep,"game_type"].astype(str).to_numpy()=="F",fw,1.).astype(np.float32); pool=Pool(x.loc[keep],labels,weight=w,cat_features=cats,feature_names=data.feature_sets["rich"]); m=CatBoostRegressor(**_params(cfg,"MultiRMSE")).fit(pool); direct=np.clip(m.predict(vp,ntree_end=int(cfg["recipe"]["direct"]["tree"])),0,1)[:,0].astype(np.float64); comp["direct"]=direct; _save(m,out,"direct_multi",save_models); del m,pool,labels,w; gc.collect()
+        x,cats=_prepare_x(tr,data.feature_sets["rich"]); xv,_=_prepare_x(va,data.feature_sets["rich"]); vp=Pool(xv,cat_features=cats,feature_names=data.feature_sets["rich"])
+        keep=aux_train[list(AUX_NAMES)].notna().all(axis=1).to_numpy(); success=tr.loc[keep,"control_success"].to_numpy(np.float32); av=aux_train.loc[keep,list(AUX_NAMES)].to_numpy(np.float32)
+        repeats=int(cfg["recipe"]["direct"]["success_repeats"]); labels=np.column_stack([*[success]*repeats,av]); fw=float(cfg["recipe"]["direct"]["f_weight"]); w=np.where(tr.loc[keep,"game_type"].astype(str).to_numpy()=="F",fw,1.).astype(np.float32); pool=Pool(x.loc[keep],labels,weight=w,cat_features=cats,feature_names=data.feature_sets["rich"]); m=CatBoostRegressor(**_params(cfg,"MultiRMSE")).fit(pool); comp["direct"]=np.clip(m.predict(vp,ntree_end=int(cfg["recipe"]["direct"]["tree"])),0,1)[:,0].astype(np.float64); _save(m,out,"direct_multi",save_models); del m,pool,labels,w; gc.collect()
+        # The historical standalone aux-head script indexed auxiliary labels produced
+        # before the 2024 split, so keep that exact scope here.
         for head,key in (("reverse","reverse_tree"),("middle","middle_tree")):
-            h=aux[head].notna().to_numpy(); pool=Pool(x.loc[h],aux.loc[h,head].to_numpy(np.int8),cat_features=cats,feature_names=data.feature_sets["rich"]); m=CatBoostClassifier(**_params(cfg,"Logloss")).fit(pool); comp["reverse600" if head=="reverse" else "middle400"]=m.predict_proba(vp,ntree_end=int(cfg["recipe"]["aux_heads"][key]))[:,1].astype(np.float64); _save(m,out,f"aux_{head}",save_models); del m,pool; gc.collect()
-        jav=aux.loc[keep,list(AUX_NAMES)].to_numpy(np.int8); codes=jav@(1<<np.arange(len(AUX_NAMES),dtype=np.int16)); classes=np.unique(codes); ci=np.searchsorted(classes,codes); fw=float(cfg["recipe"]["joint"]["f_weight"]); w=np.where(tr.loc[keep,"game_type"].astype(str).to_numpy()=="F",fw,1.).astype(np.float32); pool=Pool(x.loc[keep],ci,weight=w,cat_features=cats,feature_names=data.feature_sets["rich"]); m=CatBoostClassifier(**_params(cfg,"MultiClass")).fit(pool); prob=m.predict_proba(vp,ntree_end=int(cfg["recipe"]["joint"]["tree"])); q=_joint_mapping(tr,keep,ci,success.astype(float),len(classes)); comp["joint"]=np.sum(prob*q[(gt=="F").astype(np.int8)],axis=1); _save(m,out,"joint",save_models); del m,pool,prob,jav,codes,ci,w,x,xv,vp; gc.collect()
+            h=aux_full_tr[head].notna().to_numpy(); pool=Pool(x.loc[h],aux_full_tr.loc[h,head].to_numpy(np.int8),cat_features=cats,feature_names=data.feature_sets["rich"]); m=CatBoostClassifier(**_params(cfg,"Logloss")).fit(pool); comp["reverse600" if head=="reverse" else "middle400"]=m.predict_proba(vp,ntree_end=int(cfg["recipe"]["aux_heads"][key]))[:,1].astype(np.float64); _save(m,out,f"aux_{head}",save_models); del m,pool; gc.collect()
+        jav=aux_train.loc[keep,list(AUX_NAMES)].to_numpy(np.int8); codes=jav@(1<<np.arange(len(AUX_NAMES),dtype=np.int16)); classes=np.unique(codes); ci=np.searchsorted(classes,codes); fw=float(cfg["recipe"]["joint"]["f_weight"]); w=np.where(tr.loc[keep,"game_type"].astype(str).to_numpy()=="F",fw,1.).astype(np.float32); pool=Pool(x.loc[keep],ci,weight=w,cat_features=cats,feature_names=data.feature_sets["rich"]); m=CatBoostClassifier(**_params(cfg,"MultiClass")).fit(pool); prob=m.predict_proba(vp,ntree_end=int(cfg["recipe"]["joint"]["tree"])); q=_joint_mapping(tr,keep,ci,success.astype(float),len(classes)); comp["joint"]=np.sum(prob*q[(gt=="F").astype(np.int8)],axis=1); _save(m,out,"joint",save_models); del m,pool,prob,jav,codes,ci,w,x,xv,vp; gc.collect()
     timing["rich_models_sec"]=time.perf_counter()-t
 
     t=time.perf_counter()
     with stage("gate + conditional"):
-        x,cats=_prepare_x(tr,data.feature_sets["hurdle"]); xv,_=_prepare_x(va,data.feature_sets["hurdle"]); vp=Pool(xv,cat_features=cats,feature_names=data.feature_sets["hurdle"]); usable=aux[["reverse","middle"]].notna().all(axis=1).to_numpy(); gate=((aux["reverse"]==0)&(aux["middle"]==0)).to_numpy(); fw=float(cfg["recipe"]["gate_conditional"]["f_weight"]); gw=np.where(tr.loc[usable,"game_type"].astype(str).to_numpy()=="F",fw,1.).astype(np.float32); pool=Pool(x.loc[usable],gate[usable].astype(np.float32),weight=gw,cat_features=cats,feature_names=data.feature_sets["hurdle"]); m=CatBoostRegressor(**_params(cfg,"RMSE")).fit(pool); comp["gate600"]=np.clip(m.predict(vp,ntree_end=int(cfg["recipe"]["gate_conditional"]["gate_tree"])),0,1).astype(np.float64); _save(m,out,"gate_brier",save_models); del m,pool,gw; gc.collect()
+        x,cats=_prepare_x(tr,data.feature_sets["hurdle"]); xv,_=_prepare_x(va,data.feature_sets["hurdle"]); vp=Pool(xv,cat_features=cats,feature_names=data.feature_sets["hurdle"]); usable=aux_train[["reverse","middle"]].notna().all(axis=1).to_numpy(); gate=((aux_train["reverse"]==0)&(aux_train["middle"]==0)).to_numpy(); fw=float(cfg["recipe"]["gate_conditional"]["f_weight"]); gw=np.where(tr.loc[usable,"game_type"].astype(str).to_numpy()=="F",fw,1.).astype(np.float32); pool=Pool(x.loc[usable],gate[usable].astype(np.float32),weight=gw,cat_features=cats,feature_names=data.feature_sets["hurdle"]); m=CatBoostRegressor(**_params(cfg,"RMSE")).fit(pool); comp["gate600"]=np.clip(m.predict(vp,ntree_end=int(cfg["recipe"]["gate_conditional"]["gate_tree"])),0,1).astype(np.float64); _save(m,out,"gate_brier",save_models); del m,pool,gw; gc.collect()
         cond=usable&gate; cw=np.where(tr.loc[cond,"game_type"].astype(str).to_numpy()=="F",fw,1.).astype(np.float32); pool=Pool(x.loc[cond],tr.loc[cond,"control_success"].to_numpy(np.int8),weight=cw,cat_features=cats,feature_names=data.feature_sets["hurdle"]); m=CatBoostClassifier(**_params(cfg,"Logloss")).fit(pool); comp["cond400"]=m.predict_proba(vp,ntree_end=int(cfg["recipe"]["gate_conditional"]["conditional_tree"]))[:,1].astype(np.float64); _save(m,out,"conditional",save_models); del m,pool,cw,x,xv,vp; gc.collect()
     timing["gate_conditional_sec"]=time.perf_counter()-t
 
@@ -74,7 +81,7 @@ def train(cfg):
 
     t=time.perf_counter()
     with stage("structured ids"):
-        x,cats=_prepare_x(tr,data.feature_sets["structured"]); xv,_=_prepare_x(va,data.feature_sets["structured"]); keep=aux[["reverse","middle"]].notna().all(axis=1).to_numpy(); r=aux.reverse.to_numpy(); mm=aux.middle.to_numpy(); sy=tr.control_success.to_numpy(); cls=np.where(sy==1,0,np.where((r==0)&(mm==0),1,np.where((r==1)&(mm==0),2,np.where((r==0)&(mm==1),3,4)))).astype(np.int8); pool=Pool(x.loc[keep],cls[keep],cat_features=cats,feature_names=data.feature_sets["structured"]); vp=Pool(xv,cat_features=cats,feature_names=data.feature_sets["structured"]); m=CatBoostClassifier(**_params(cfg,"MultiClass")).fit(pool); comp["structured"]=m.predict_proba(vp,ntree_end=int(cfg["recipe"]["structured"]["tree"]))[:,0].astype(np.float64); _save(m,out,"structured_ids",save_models); del m,pool,vp,x,xv,cls; gc.collect()
+        x,cats=_prepare_x(tr,data.feature_sets["structured"]); xv,_=_prepare_x(va,data.feature_sets["structured"]); keep=aux_train[["reverse","middle"]].notna().all(axis=1).to_numpy(); r=aux_train.reverse.to_numpy(); mm=aux_train.middle.to_numpy(); sy=tr.control_success.to_numpy(); cls=np.where(sy==1,0,np.where((r==0)&(mm==0),1,np.where((r==1)&(mm==0),2,np.where((r==0)&(mm==1),3,4)))).astype(np.int8); pool=Pool(x.loc[keep],cls[keep],cat_features=cats,feature_names=data.feature_sets["structured"]); vp=Pool(xv,cat_features=cats,feature_names=data.feature_sets["structured"]); m=CatBoostClassifier(**_params(cfg,"MultiClass")).fit(pool); comp["structured"]=m.predict_proba(vp,ntree_end=int(cfg["recipe"]["structured"]["tree"]))[:,0].astype(np.float64); _save(m,out,"structured_ids",save_models); del m,pool,vp,x,xv,cls; gc.collect()
     timing["structured_sec"]=time.perf_counter()-t
 
     safe,sw=build_safe_core(y,gt,comp["mixed"],comp["offset"],comp["joint"]); final,fw=build_final(y,gt,safe,comp["structured"]); comp["safe"]=safe; comp["pred"]=final; metrics={"mixed":summary(y,mixed),"safe":summary(y,safe),"final":summary(y,final),"mixed_blend":mixed_blend,"safe_weights":sw,"final_weights":fw,"timing_sec":timing,"rows":{"train":len(tr),"valid":len(va)}}; ref=cfg["reference"]; metrics["reference_delta"]={"mixed_brier":metrics["mixed"]["brier"]-float(ref["mixed_brier"]),"safe_core_brier":metrics["safe"]["brier"]-float(ref["safe_core_brier"]),"final_brier":metrics["final"]["brier"]-float(ref["final_brier"])}; metrics["reference_pass"]=abs(metrics["final"]["brier"]-float(ref["final_brier"]))<=float(ref["brier_tolerance"])

@@ -19,7 +19,7 @@ class PreparedData:
     valid_mask: np.ndarray
     y_valid: np.ndarray
     gt_valid: np.ndarray
-    aux: pd.DataFrame
+    aux: pd.DataFrame  # full-frame auxiliary reconstruction used by frozen profiles / aux heads
     feature_sets: dict[str, list[str]]
     categorical_extra: set[str]
 
@@ -95,7 +95,10 @@ def prepare(cfg: dict) -> PreparedData:
     anchor_success=["eng_anchor_available","eng_anchor_gap_n","eng_anchor_success_rate","eng_since_anchor_success_rate","eng_since_anchor_success_minus_long"]
     multi_anchor=[x for s in ("reverse","middle","ball","strike") for x in (f"eng_anchor_{s}_rate",f"eng_since_anchor_{s}_rate",f"eng_since_anchor_{s}_minus_long")]
     base=[*recent_core.feature_set("recent_raw_game_type"),regime_core.RECENT_FLAG,*regime_core.FAST_CONT,*regime_core.RANGE_CONT,*context_core.INTERACTION_COLUMNS,*paths]
-    rich=[*base,*anchor_success,*multi_anchor,*banchor,*cross4,*matchup,*count,*pressure,*domain,*auxprof]; hurdle=[*rich,*condprof]; offset=[*base,*anchor_success,*banchor,*cross1]
+    rich=[*base,*anchor_success,*multi_anchor,*banchor,*cross4,*matchup,*count,*pressure,*domain,*auxprof]
+    # Historical hurdle scripts had --anchor but no --multi-anchor: do not inherit rich's 12 multi-anchor columns here.
+    hurdle=[*base,*anchor_success,*banchor,*cross4,*matchup,*count,*pressure,*domain,*auxprof,*condprof]
+    offset=[*base,*anchor_success,*banchor,*cross1]
     structured=[*recent_core.feature_set("recent_raw_game_type"),"pitcher_id","batter_id",regime_core.RECENT_FLAG,*regime_core.FAST_CONT,*regime_core.RANGE_CONT,*context_core.INTERACTION_COLUMNS,*paths]
     for name,features in {"rich":rich,"hurdle":hurdle,"offset":offset,"structured":structured}.items():
         if len(features)!=len(set(features)): raise RuntimeError(f"duplicate {name} features")
