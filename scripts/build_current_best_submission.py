@@ -7,11 +7,20 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import warnings
 import zipfile
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+# The frozen baseline core intentionally preserves the exact historical feature
+# construction order for numerical reproducibility. That legacy code inserts many
+# DataFrame columns one by one, which pandas reports as PerformanceWarning. The
+# warning is noisy but does not indicate incorrect values, so keep baseline logs
+# readable. New experimental code should avoid fragmentation rather than rely on
+# this suppression.
+warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
 
 ROOT = Path(__file__).resolve().parents[1]
 LEGACY = ROOT / "src" / "baseline_legacy"
