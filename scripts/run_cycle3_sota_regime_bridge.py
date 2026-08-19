@@ -9,7 +9,42 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
+import bitaboost.baseline as baseline_core
+from bitaboost.features import prepare as prepare_features
 from bitaboost.cycle3.sota_regime_bridge import run
+
+
+def _install_early_fold_prepare_fix() -> None:
+    """Align full-frame auxiliary targets after an early validation-season slice.
+
+    SAFE982 normally validates on 2024, so the prepared frame and the full auxiliary
+    reconstruction both contain all 2019-2024 rows. Cycle3 intentionally moves the
+    validation season back to 2023. `features.prepare()` then keeps only <=2023 rows
+    after regime-feature construction, while its auxiliary table still contains the
+    original full frame. The historical baseline trainer indexes that table with the
+    shortened train mask, which causes a boolean-length mismatch.
+
+    Keep the core SAFE implementation untouched and patch only this diagnostic runner:
+    align auxiliary rows to the exact prepared-frame index before baseline training.
+    For the ordinary 2024 SAFE run lengths already match and this is a no-op.
+    """
+
+    def prepare_aligned(cfg):
+        data = prepare_features(cfg)
+        if len(data.aux) != len(data.frame):
+            missing = data.frame.index.difference(data.aux.index)
+            if len(missing):
+                raise RuntimeError(
+                    f"Cycle3 auxiliary alignment lost {len(missing)} prepared rows"
+                )
+            data.aux = data.aux.loc[data.frame.index].copy()
+        if len(data.aux) != len(data.frame):
+            raise RuntimeError(
+                f"Cycle3 auxiliary alignment failed: aux={len(data.aux)} frame={len(data.frame)}"
+            )
+        return data
+
+    baseline_core.prepare = prepare_aligned
 
 
 def main() -> None:
@@ -18,6 +53,7 @@ def main() -> None:
     parser.add_argument("--no-reuse-source", action="store_true")
     args = parser.parse_args()
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
+    _install_early_fold_prepare_fix()
     result = run(reuse_source=not args.no_reuse_source)
     print("\n[Cycle3 complete]")
     print(f"SAFE982={result['target_2024']['brier']:.12f}")
