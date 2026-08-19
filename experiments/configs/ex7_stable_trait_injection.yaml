@@ -1,0 +1,32 @@
+baseline_config: configs/baseline_safe_981.yaml
+baseline_predictions: outputs/baseline/predictions.npz
+baseline_metrics: outputs/baseline/metrics.json
+output_dir: outputs/experiments/ex7_stable_trait_injection
+
+profile:
+  mode: career
+  reliability_k: 200.0
+  traits: [success, strike]
+
+variants:
+  - name: career_success
+    features: [career_success]
+  - name: career_strike
+    features: [career_strike]
+  - name: career_success_strike
+    features: [career_success, career_strike]
+  - name: career_success_strike_reliability
+    features: [career_success, career_strike, career_log_n, career_reliability, career_has]
+  - name: career_success_strike_deviation
+    features: [career_success, career_strike, career_log_n, career_reliability, career_has, dev_success, dev_strike]
+
+promotion:
+  min_final_brier_gain: 0.00002
+  max_domain_regression: 0.00020
+
+safety:
+  independent_rows_only: true
+  note: >-
+    Every career feature for a season-s row is aggregated only from pitcher seasons < s.
+    No validation/test-row sorting, rolling, aggregation, cumulative state, or cross-row reference is used.
+    Downstream SAFE blend weights are frozen from the existing SAFE982 artifact and are not re-fit on 2024.
