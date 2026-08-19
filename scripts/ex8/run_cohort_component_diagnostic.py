@@ -18,8 +18,13 @@ def main() -> None:
     result = run(args.config)
     print("\n[EX8 complete]")
     print(f"SAFE982={result['overall']['final_brier']:.12f}")
-    for key, value in result["oracle_summary"].items():
-        print(f"{key}={value}")
+    for name in ("pitcher", "batter", "cross"):
+        item = result["oracle_summary"][name]
+        print(
+            f"{name}: coverage={item['coverage']:.3%} "
+            f"fallback_routed={item['fallback_routed_brier']:.12f} "
+            f"gain={item['fallback_gain_vs_safe']:+.12f}"
+        )
     print("report=outputs/experiments/ex8_cohort_component_diagnostic/report.md")
 
 
