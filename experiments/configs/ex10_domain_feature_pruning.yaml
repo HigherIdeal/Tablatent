@@ -1,0 +1,26 @@
+baseline_config: configs/baseline_safe_981.yaml
+baseline_predictions: outputs/baseline/predictions.npz
+baseline_metrics: outputs/baseline/metrics.json
+output_dir: outputs/experiments/ex10_domain_feature_pruning
+
+recent_season: 2023
+validation_season: 2024
+drop_ks: [0, 1, 3, 5, 10, 15, 20]
+protected_features: [game_type]
+
+domain_model:
+  iterations: 300
+  learning_rate: 0.05
+  depth: 6
+  l2_leaf_reg: 12.0
+  random_strength: 0.5
+  random_seed: 42
+  gpu_ram_part: 0.82
+
+safety:
+  independent_rows_only: true
+  note: >-
+    Feature ranking is learned only from official <=2023 inputs using the 2023-vs-older
+    domain label. Season, target, row_id, and entity IDs are excluded from the domain
+    classifier. 2024 is used only for final evaluation. SAFE downstream components and
+    all existing mixture/simplex weights remain frozen.
