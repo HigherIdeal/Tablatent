@@ -1,0 +1,402 @@
+# 1. 대회 목표·데이터·규칙·제출 환경·제한사항
+
+- **대회**: LG Aimers 9기 × LG스포츠, “다음 투구의 제구 성공 확률 예측”.
+- **예측 단위**: 투구 1행. 현재 투구가 발생하기 **직전까지 알 수 있는 정보만** 사용하여 `P(control_success=1)`을 `[0,1]` 확률로 출력.
+- **Target**: `control_success` binary. 단순 strike 예측이 아니라 투수가 의도한 제구 범위에 성공했는지에 가까운 과제.
+- **공식 평가**: Brier Skill Score.
+  - `BS = mean((p-y)^2)`; 낮을수록 좋음.
+  - `r = mean(y)`; `BS_ref = r(1-r)`.
+  - `Score = max(0, 100000 * (1 - BS / BS_ref))`.
+  - 2025 실제 `r`은 비공개. 따라서 내부 연구에서는 **Brier 자체를 1차 지표**, 내부 BSS/score는 2차 지표로 사용.
+- **공식 데이터**:
+  - `data/raw/train.csv`: 1,475,092행 × 49열, 2019–2024, target 포함.
+  - `data/raw/test.csv`: 배포본은 형식 확인용 5행 × 48열. 평가 서버에서는 실제 2025 test **245,789행**으로 교체.
+  - `data/raw/sample_submission.csv`: 배포본 5행 × 2열. 서버 실제 row 수에 맞게 `submission.csv` 생성 필요.
+  - `data/raw/trackman_history.csv`: 1,793,078행 × 30열, 2019–2024 Trackman 과거 로그.
+  - 시즌별 train 행수: 2019 `237,413`, 2020 `244,087`, 2021 `247,088`, 2022 `247,472`, 2023 `245,525`, 2024 `253,507`.
+  - 대표 개발 split: 2019–2022 `976,060` → 2023 `245,525` → 2024 `253,507`. 현재 SAFE982 재현은 2019–2023 `1,221,585` → 2024 `253,507`.
+- **공식 신호군**:
+  - 경기상황: inning/count/outs/base/runners/score/top-bottom 등.
+  - 경기 중요도: win expectancy, leverage index(`li`) 등.
+  - 누적 과거이력: `asof_*`, `prev*`, pitch-mix, 선수/팀/hand/context.
+  - Trackman: `rel_speed`, `spin_rate`, `induced_vert_break`, `horz_break`, `extension`, `rel_height`, `rel_side`, `zone_speed`, pitch type 등.
+- **절대 규칙 — test 각 행 독립**:
+  - 모든 2025 test 행은 서로 독립적인 prediction target.
+  - **금지**: test 행 간 sort 후 `shift`, `rolling`, prefix/as-of reconstruction, test 내부 groupby/aggregation, test row frequency, 다른 test row lookup, test 전체 평균/분포에 의존한 normalization/calibration, test peer 기반 보정.
+  - 한 test 행을 단독으로 넣었을 때와 전체 test에 넣었을 때 **동일 prediction**이어야 함. 프로젝트에서는 `row_diff=0`을 안전성 체크로 사용.
+  - **허용**: 현재 test 행 자체의 공식 feature, train만으로 미리 학습한 모델/통계, 이전 시즌까지 고정한 profile/mapping, 공식 Trackman의 과거 시즌 정보.
+  - prefix-state 계열의 내부 `1222.9` 기록은 이 규칙 위반 때문에 **무효**이며 `dist/quarantine_rule_violation/` 계열로 격리. 절대 복구·제출·SOTA 비교 기준으로 사용하지 말 것.
+- **외부 정보 관련**:
+  - 공식 제공 데이터 외 외부 데이터 사용 금지.
+  - 원격 서버/API 의존 추론 금지.
+  - 허용 범위를 벗어난 사전학습모델/가중치 사용 금지. 새 foundation/pretrained 모델을 도입하려면 해당 대회의 최신 공식 rule 범위를 먼저 재확인.
+  - 외부 정답/리더보드 역산값/정답에 준하는 정보를 feature, calibration, blend 선택에 사용하지 않음.
+- **공식 rule refresh 포인트(2026-08-19 기준)**:
+  - DACON competition `236743`의 `overview/description`, `overview/evaluation`, `overview/rules`, `data`를 제출 전 다시 확인.
+  - 운영진 독립행 reminder `talkboard/417094` 및 프로젝트에서 이미 감사한 `417123`; 외부 정답 관련 `417157`도 다시 확인.
+  - 과거 local builder가 `1GB`를 보수적 한도로 사용한 적이 있으나 **현재 공식 ZIP 한도는 10GB**. 1GB를 공식 규칙으로 오인하지 말 것.
+- **코드 제출 형식**:
+  - 최상위 구조는 `model/`, `script.py`, `requirements.txt`.
+  - 평가 서버가 `data/`와 `output/`을 추가.
+  - `data/`는 read-only. `script.py`가 `output/submission.csv`를 반드시 생성.
+  - `requirements.txt`는 `pip install -r requirements.txt`로 설치 가능해야 함.
+  - 인터넷 연결은 패키지 설치 이후 사용 불가; 실행 중 외부 다운로드/API 호출 금지.
+  - 공식 현재 제한: **추론 ≤10분, 패키지 설치 ≤10분, ZIP ≤10GB, 압축해제 ≤32GB, 6 vCPU, RAM 28GB, NVIDIA L4 22.4GiB**.
+  - 공식 평가 페이지의 한 문장에 `open/`을 읽으라는 표현이 있으나, 구조 표와 실제 평가 package는 `data/`를 사용. 실제 제출은 `baseline_submit.zip` 및 이미 점수 복원된 package 구조를 우선 기준으로 삼음.
+- **실전 검증 artifact**:
+  - 과거 실제 leaderboard 점수 확인 package: `/home/kjw/Aimers/Tablatent/dist/build_final_optimized.zip`.
+  - rule-safe 외부 기준 점수: **1098.86143**.
+  - prefix-state 위반 발견 후 안전본: `/home/kjw/Aimers/Tablatent/dist/sota_submit_SAFE.zip`.
+  - Bitaboost repo 자체는 의도적으로 **research/evaluation repo**이며 현재 `README.md` 기준 submission builder를 포함하지 않음.
+  - 제출 builder를 다시 만들 때는 공식 `baseline_submit.zip`의 최상위 구조, 현재 실제 scoring package, `requirements.txt`를 기준으로 최소 파일만 묶을 것.
+  - 연구 cache의 `.pkl`은 허용하되 **최종 submit ZIP에는 가능하면 넣지 않는다**. 최종 모델은 `.cbm` 등 추론에 필요한 artifact만 포함.
+
+# 2. 현재 내부 SoTA 구현 모델 구조·하이퍼파라미터·재현 계약
+
+- **Canonical source-of-truth**: remote `HigherIdeal/Tablatent`, branch **`bitaboost`**, local `~/Aimers/Bitaboost`.
+- **Canonical config**: `configs/baseline_safe_981.yaml`.
+- **Frozen historical reference**:
+  - config reference Brier `0.247355098397`, internal score `981.4893`.
+  - 최근 완전 재현 run에서 SAFE982 final Brier **`0.247352360403`**가 반복 재현됨(EX7 control, EX8/EX9 기준).
+  - 두 값의 차이는 복구/재현 과정의 매우 작은 수치 차이이며, 새 실험의 실질 기준은 `0.247352360403`; provenance reference 검증은 config의 `0.247355098397 ± 5e-6`.
+  - 실제 hidden LB 안전 기준: **1098.86143**. 내부 점수와 hidden LB는 절대 동일 척도로 해석하지 말 것.
+- **2024 SAFE 학습/검증**:
+  - train: season `<2024` = 2019–2023 = `1,221,585`.
+  - valid: season `2024` = `253,507`.
+  - feature counts: `rich=185`, `hurdle=185`, `offset=90`, `structured=74`.
+- **전처리/feature lineage**:
+  - `src/bitaboost/features.py`가 exact recovered SAFE lineage.
+  - canonical row frame → auxiliary target reconstruction(`reverse`, `middle`, `ball`, `strike`) → frozen historical features → regime features.
+  - frozen feature builders: pitcher anchor, batter anchor, anchor cross, matchup, count profile, pressure profile, domain profile, auxiliary profile, conditional profile, context interactions, pitcher/batter frozen paths.
+  - frozen profile은 season `s` 행에서 원칙적으로 `<s` history를 읽도록 구현.
+  - path helper가 target-rate 계열을 생성하더라도 SAFE feature set에서는 `_rate` suffix path output을 제외.
+  - `game_type`은 문자열 정규화 후 `R/F` domain으로 유지. raw `pitcher_id`, `batter_id`는 structured head에서만 명시적으로 포함.
+  - `prepare_x()` 및 categorical ordering을 “비슷한 새 구현”으로 교체하지 말 것. prediction-level equivalence가 입증되기 전에는 recovered legacy lineage를 그대로 사용.
+- **공통 CatBoost parameter**:
+  - `iterations=600`, `learning_rate=0.03`, `depth=8`, `l2_leaf_reg=20.0`.
+  - `random_strength=0.5`.
+  - `bootstrap_type=Bayesian`, `bagging_temperature=0.5`.
+  - `border_count=128`, `random_seed=42`, `has_time=true`, `one_hot_max_size=10`.
+  - `task_type=GPU`, physical GPU `2`를 `CUDA_VISIBLE_DEVICES=2`로 노출하여 CatBoost logical `devices="0"`.
+  - `gpu_ram_part=0.92`, `allow_writing_files=false`, `logging_level=Silent`.
+- **Component 1 — direct rich MultiRMSE**:
+  - rich 185 features.
+  - `success` target을 **8회 repeat**하고 `reverse/middle/ball/strike` auxiliary를 함께 넣은 `MultiRMSE` regressor.
+  - `game_type=="F"` sample weight `2.0`, R `1.0`.
+  - fit model max 600 trees, prediction `ntree_end=600`.
+  - 최종 direct probability는 MultiRMSE output의 첫 success dimension.
+- **Component 2 — standalone auxiliary heads**:
+  - same rich features.
+  - `reverse`: CatBoostClassifier Logloss, `600` trees.
+  - `middle`: CatBoostClassifier Logloss, `400` trees.
+  - auxiliary labels은 historical SAFE와 동일하게 full-frame auxiliary reconstruction scope를 보존.
+- **Component 3 — hurdle/gate conditional**:
+  - 핵심 논리: auxiliary에서 `reverse=1` 또는 `middle=1`인 경우 `control_success=0` 구조를 이용.
+  - gate label: `reverse==0 and middle==0`.
+  - learned gate: CatBoostRegressor RMSE(Brier proxy), `600` trees.
+  - conditional success: gate-valid subset에서 CatBoostClassifier Logloss, `400` trees.
+  - F weight `1.0`.
+  - independent gate:
+    - `independent = clip(1 - reverse600 - middle400 - 1.2*reverse600*middle400, 0, 1)`.
+  - hybrid gate:
+    - `hybrid = 0.4*independent + 0.6*learned_gate600`.
+  - logic prediction:
+    - `logic = hybrid * conditional400`.
+- **Component 4 — mixed direct/logic**:
+  - R/F 각각 closed-form Brier-optimal convex blend.
+  - recovered expected logic weights: R `0.36778562369546725`, F `0.6907781178377251`.
+  - 실제 baseline run은 2024 validation prediction에서 domain weight를 refit하며 config expected 값은 forensic audit용.
+- **Component 5 — offset cross1**:
+  - 90 features.
+  - recent prior + residual CatBoostRegressor RMSE.
+  - `tree=400`.
+  - `feature_version=cross1`, old preserved cross outputs만 사용:
+    - `eng_anchor_cross_success`, `eng_anchor_cross_middle`,
+      `eng_anchor_pitch_success_shrunk`, `eng_anchor_batter_success_shrunk`,
+      `eng_anchor_gap_logratio`.
+- **Component 6 — joint outcome**:
+  - rich 185 features.
+  - auxiliary `reverse/middle/ball/strike`의 binary code를 MultiClass로 학습, `600` trees.
+  - F sample weight `2.0`.
+  - class→success probability table은 train에서 고정.
+  - F domain은 2023 이후 F data가 있으면 mapping table 계산 시 `season>=2023`만 사용하여 post-2023 F regime을 반영.
+- **Component 7 — structured IDs**:
+  - 74 features, raw `pitcher_id`, `batter_id` 포함.
+  - 5-class outcome: success / valid-failure / reverse-only / middle-only / both.
+  - MultiClass, `600` trees.
+  - 최종 success probability는 class 0 probability.
+- **SAFE core ensemble**:
+  - R/F별 SLSQP simplex, components `[mixed, offset, joint]`, weights nonnegative/sum1.
+  - expected audit weights:
+    - R `[0.78368392, 0.20305241, 0.01326367]`.
+    - F `[0.51146784, 0.37011603, 0.11841613]`.
+- **FINAL ensemble**:
+  - R/F별 simplex `[SAFE core, structured]`.
+  - expected audit weights:
+    - R `[1.0, 0.0]`.
+    - F `[0.958476823938, 0.041523176062]`.
+  - 즉 structured IDs는 사실상 **F에만 약 4.15%** 보정.
+- **재현 명령**:
+  - `conda activate bitaboost`
+  - `cd ~/Aimers/Bitaboost`
+  - `python scripts/prepare_data.py --config configs/baseline_safe_981.yaml`
+  - `python scripts/baseline_train.py --config configs/baseline_safe_981.yaml`
+  - `python scripts/eval.py --config configs/baseline_safe_981.yaml`
+- **재현 artifact**:
+  - `outputs/baseline/predictions.npz`: `y`, `gt`, direct/aux/gate/conditional/offset/joint/structured/safe/final vectors + R/F weights.
+  - `outputs/baseline/metrics.json`.
+  - `outputs/baseline/resolved_config.json`.
+  - config의 `save_models=false`가 기본이므로 submission 모델을 만들 때는 별도 full-history fit/package 단계 필요.
+- **메모리/속도 정책**:
+  - feature engineering 1회.
+  - rich/hurdle/offset/structured matrix를 순차 처리.
+  - Pool/model을 fit 사이에 release.
+  - full giant matrix를 동시에 들고 있지 않음.
+  - pandas `PerformanceWarning`만 suppress; runtime/numeric error는 숨기지 않음.
+- **절대 금지된 “가짜 SOTA”**:
+  - prefix/asof inversion이 validation/test 내부의 직전 row, shift, rolling, prefix state를 읽어 내부 `1222.8806`/Brier `0.246752060`까지 갔던 계열.
+  - 높은 수치여도 대회 독립행 규칙 위반. 모든 관련 결과/ZIP은 무효이며 SAFE SOTA와 비교하지 않는다.
+
+# 3. 현재 진단된 프로젝트의 근본 문제
+
+- **문제 1 — 2023 전후 강한 distribution/relationship break**:
+  - target rate: 2019–2022 train 평균 약 `0.539537`, 2023 `0.499957`, 2024 `0.486105`.
+  - `game_type`별 approximate success rate:
+    - 2019 F/R `0.6893 / 0.5495`
+    - 2020 `0.5878 / 0.5269`
+    - 2021 `0.7038 / 0.5128`
+    - 2022 `0.7087 / 0.5037`
+    - 2023 `0.4729 / 0.5031`
+    - 2024 `0.4593 / 0.4897`
+  - F가 2023에 급변. 2023을 제거하면 2024가 좋아지는 문제가 아니라, 오히려 2023은 2025에 가까운 **새 regime의 첫 관측치**로 보임.
+  - domain classifier(old vs 2023) AUC `0.9787066`. 다만 이는 `P(X)`가 매우 다름을 증명할 뿐 `P(Y|X)` 변화 자체의 충분조건은 아님.
+- **문제 2 — weak row-level signal / Brier near 0.25**:
+  - 2023에서 단순 CatBoost/LightGBM은 거의 prior 수준. 과거 baseline 예: CatBoost `~0.249931`, LightGBM `~0.250946`.
+  - 모델 capacity를 키우거나 depth/seed를 바꾸는 것보다 data representation/temporal robustness가 병목.
+  - 많은 feature tweak가 SAFE 기준 `1e-5` 수준에서 흔들리고, 2024 한 fold에만 맞으면 쉽게 local minimum/overfit.
+- **문제 3 — 최근 regime는 필요하지만 old history도 필요**:
+  - recent_raw hidden LB `858.16`으로 2025가 post-2023 쪽에 가깝다는 evidence.
+  - 그러나 global recency decay, old rows 제거, 2023 제거는 일반적으로 악화. old history의 stable signal도 필요.
+  - 따라서 “최근만 사용”/“과거만 사용” 둘 다 불완전. SAFE는 domain/frozen profile/hurdle/joint로 이를 완화.
+- **문제 4 — internal 2024와 hidden 2025의 순위가 일치하지 않음**:
+  - SAFE internal 약 `981.5` 계열이 hidden LB `1098.86143`.
+  - 2024에서 `1e-5` 개선이 hidden에서 개선된다는 보장 없음.
+  - 2024를 반복 튜닝한 이력이 있으므로 새 agent는 반드시 2022/2023/2024 rolling evidence, worst fold, R/F breakdown을 같이 봐야 함.
+- **문제 5 — test 독립행 규칙이 가장 강력한 시계열 신호를 금지**:
+  - prefix-state/multi-scale rolling은 내부에서 `1063 → 1186 → 1222+`까지 매우 큰 signal을 보였지만 test peer dependence 때문에 전부 무효.
+  - 즉 “실제 연속 투구 sequence가 강한 정보”라는 진단은 맞지만, 제출에서는 **현재 공식 row에 이미 들어있는 asof/prev 정보 또는 train에서 frozen된 representation으로만 근사**해야 함.
+- **문제 6 — cold/rich heterogeneity는 있으나 routing으로 일반화되지 않음**:
+  - context 대비 full-history gain은 cold/cold `+0.01651`, cold/rich `+0.00757`, rich/cold `+0.00846`, rich/rich `+0.00229`.
+  - 하지만 previous-fold-selected pitcher/batter/cross router는 3개 transfer에서 모두 full-history보다 나쁨. specialist routing은 폐기.
+- **문제 7 — latent pitcher state는 존재하지만 SAFE residual을 못 설명**:
+  - adjacent-season state correlations: success `0.387`, reverse `0.395`, middle `0.225`, ball `0.550`, strike `0.448`.
+  - 다음 시즌 state 자체는 prediction 가능하나 prior state→future residual ridge는 2023 gain `-0.001214`, 2024 `-0.000671`. 즉 state persistence ≠ 추가 predictive residual.
+- **문제 8 — Trackman namespace/linkage와 physical stability**:
+  - `pitcher_id`와 `pitcher_trackman_id`는 직접 namespace가 달라 overlap `0`이 정상.
+  - 과거 공식-data-only record linkage에서 exactly matched games `2,693`, aligned pitches `808,856`, evidence pitcher `731`, high-purity accepted `584`, accepted aligned pitches `800,401`까지 구축한 이력 존재.
+  - 초창기 direct crosswalk 시도는 불안정했지만 후속 context/pitchmix/Hungarian 및 high-purity filtering으로 usable mapping을 구축. 새 agent는 “ID overlap=0 → Trackman 불가”를 반복하지 말 것.
+  - 단, 큰 neural physical predictor와 direct physical branch는 F에서 악화된 이력이 있어 Trackman을 무조건 강한 feature로 간주하지 말 것.
+- **현재 핵심 결론**:
+  - tree HPO, 단순 calibration, 단순 temporal reweight, 경험 routing, backward target inversion은 거의 소진.
+  - 남은 가치 있는 질문은 **SAFE가 설명하지 못한 row-independent residual을 official prior-season Trackman mechanical dispersion/drift 또는 다른 아직 미사용한 train-only representation이 설명하는가**.
+  - 새 실험은 반드시 “기존에 안 한 질문인가?”를 먼저 검사하고, 동일 컨셉을 이름만 바꿔 재실행하지 말 것.
+
+# 4. 시도한 컨셉·성공/실패·정량 결과
+
+- **초기 direct tabular / model-family**:
+  - 2023 CatBoost 계열은 Brier 약 `0.24993`; LightGBM best 약 `0.250946`. 더 깊은 tree/다른 family가 구조적 해결책이 아님.
+  - raw identity/season 제거는 작은 개선만 제공. high-cardinality raw ID를 무조건 넣는 방향은 불안정.
+  - EB/reliability/log-count/profile/hand-crafted context cross 다수는 기존 `asof_*`와 중복 또는 temporal instability로 canonical에서 탈락.
+- **latent/VAE/Transformer 초기 계열**:
+  - history encoder/latent decoder → downstream CatBoost/MLP/bilinear 등을 시도. local reconstruction signal은 있었지만 control-success Brier에서 direct CatBoost를 이기지 못함.
+  - Qwen3-1.7B RAG도 시험했으나 100건에 수분, 10k도 매우 비효율적이라 실전 학습/추론 방향에서 중단.
+- **game_type / recent regime**:
+  - 2023부터 F success가 약 `0.70`대 → `0.47`대로 붕괴.
+  - `recent_raw`(2023–2024, raw `game_type` 유지) hidden LB **858.16**.
+  - full-history + recent expert + R-fast expert의 gated dual-track hidden LB **886.21**.
+  - `game_type` 전체 삭제가 답은 아님. 최근 모델에서는 raw `game_type`이 필요했고, stable/full expert에서는 drift feature 처리 방식이 중요.
+- **SAFE architecture 성장**:
+  - 기존 조합 internal score `840.8`.
+  - mapped-R에만 physical 정보 조건부 결합 `849.2`.
+  - `P(success)=P(valid)*P(success|valid)` hurdle 구조 `855.4`.
+  - hurdle seed 42+19 `855.6`; seed 추가는 거의 gain 없어 중단.
+  - 이후 offset/joint/structured/R-F simplex를 통합한 recovered SAFE가 config reference **Brier `0.247355098397`, score `981.4893`**.
+  - 최근 재현 baseline `0.247352360403`.
+  - 실전 SAFE lineage hidden LB **1098.86143**.
+- **Trackman physical / Arsenal**:
+  - physical은 Trackman direct-mapped R에서만 일부 유효; fallback/F에 강제 적용하면 악화.
+  - Pitch Arsenal MoE: standalone weighted Brier `0.24834853` vs baseline `0.24789305`.
+  - R: Arsenal `0.24807175` vs baseline `0.24798863`(약간 악화).
+  - F: Arsenal `0.25036706` vs baseline `0.24716205`(큰 악화).
+  - 결론: physics representation 자체는 학습되지만 direct standalone predictor로 season-stable하지 않음. Trackman은 low-dimensional/frozen state 또는 residual signal로만 재검토.
+- **prefix/asof inversion — 매우 강했지만 규칙 위반, 전부 무효**:
+  - A3 prefix state standalone 약 score `1063.6`.
+  - 기존 ensemble 결합 `1134.5`.
+  - multi-scale state `1154.4`.
+  - joint outcome 결합 `1167.5~1168.4`.
+  - global simplex `1186.8`.
+  - 2024 affine diagnostic `1226.9`; conservative fixed R×1.15/F×1.25 보정 **`1222.8806`, Brier `0.246752060`**.
+  - 이후 test 행 간 shift/rolling/prefix reconstruction 사용이 독립행 규칙 위반임을 확인. ZIP/기록 quarantine. 절대 재사용 금지.
+- **EX1 reverse expert / backward season state**:
+  - reverse expert direct structural `0.25284656`, full `0.25302880`; frozen SAFE `0.24735236`; 최적 blend alpha `0`. 실패.
+  - pitcher-season backward min200:
+    - 2022 state+id RMSE `0.043313` vs identity `0.043638`.
+    - 2023 `0.041721` vs `0.049500`.
+    - 2024 `0.034009` vs `0.035271`.
+  - 결론: 미래→과거 state reconstruction 자체는 가능하지만 row-level success prediction을 대체하지 못함.
+- **EX1 backward suite / symmetry**:
+  - min200 forward/backward RMSE가 유사: 2022 state-only `0.043030/0.043592`, 2024 `0.033919/~0.0344`; 2023은 forward `~0.03818`, backward `~0.04183`.
+  - state persistence는 존재. “방향을 바꾼 예측” 자체는 근본 해결책 아님.
+- **EX2 counterfactual hypothesis backward**:
+  - context_only: 2022 AUC `0.54199`, Brier `0.24922202`; 2023 `0.52909/0.24948865`; 2024 `0.53375/0.24919531`.
+  - history_no_id/history_plus_id는 AUC `0.500`, Brier `0.250000`; 가설 분기가 collapse.
+  - SAFE와 격차 큼. 실패.
+- **EX3 four-state backward energy / 확실한 실패·애매한 실패·애매한 성공·확실한 성공**:
+  - 기본 four-state는 대부분 AUC `0.49~0.50`, Brier `~0.2500`.
+  - strength sweep에서 2024 state-only λ=100은 Brier `0.24980309`, AUC `0.51970`까지 좋아졌지만 2022는 Brier `0.29860735`로 붕괴.
+  - 결론: counterfactual energy를 키우면 한 시즌 signal은 생기지만 temporal transfer 실패.
+- **EX4 bidirectional stable traits**:
+  - min200 adjacent-season raw correlation 예:
+    - 2022 success/reverse/ball/strike `0.586/0.597/0.601/0.560`.
+    - 2023 `0.201/0.222/0.674/0.509`.
+    - 2024 `0.672/0.671/0.651/0.547`.
+  - middle은 더 불안정.
+  - 결론: 시간 양방향으로 유지되는 pitcher trait은 있음. 그러나 “존재”와 “SAFE residual 추가 설명”은 별개.
+- **EX5 stable-trait pitch probe**:
+  - prior_success_only mean Brier `0.24952272` vs prior `0.25046108`, delta `-0.00093836`.
+  - stable4_raw mean `0.24988867`; stable4_reliable `0.24967508`; plus_middle `0.24961639`.
+  - 2024 best stable4_reliable `0.24914728`.
+  - prior보다 낫지만 SAFE `0.24735236`에 크게 못 미침.
+- **8시간 overnight broad search**:
+  - GPU2 structure `782/782` 성공, GPU3 calibration `980/980` 성공; 각 약 `28.2k sec` ≈ 7.8h.
+  - GPU2 best: `success+strike`, career, `history_no_id`, deviation=true, logloss, 600 trees/depth6/LR .035/L2 8/seed19.
+    - Brier 2022 `0.24349821`, 2023 `0.25283818`, 2024 `0.24816890`.
+  - GPU3 best: full base, 900 trees/depth7/LR .03/L2 16/random_strength .5/bagging .5/seed211 + weak intercept/affine-like calibration.
+    - 2024 `0.24790224`.
+  - 둘 다 SAFE보다 단독 성능 낮음.
+- **EX6 SAFE complementarity**:
+  - SAFE `0.247352360`, GPU2 `0.248163782`, GPU3 `0.248194939`.
+  - SAFE+GPU2, SAFE+GPU3 모든 pair blend 최적 weight `0`.
+  - triple optimum `SAFE=1.0, GPU2=0, GPU3=0`.
+  - output-level complementarity 없음 → 종료.
+- **EX7 stable-trait feature injection**:
+  - retrain control은 SAFE를 **정확히** `0.247352360403` 재현.
+  - career_success `+0.000011816`.
+  - career_strike `+0.000014534`.
+  - success+strike `+0.000024636`.
+  - success+strike+reliability `+0.000020452`.
+  - success+strike+deviation `+0.000013399`.
+  - 모두 악화 → stable trait direct injection 종료.
+- **EX8 experience/cohort routing oracle diagnostic**:
+  - pitcher coverage `98.430%`, fallback-routed `0.247350830725`, gain `+0.000001529678`.
+  - batter coverage `98.491%`, gain `-0.000002017417`.
+  - cross coverage `95.568%`, gain `-0.000000496982`.
+  - oracle에 가까운 진단에서도 gain이 거의 0 → 기존 SAFE component 경험 routing 가치 없음.
+- **EX9 2023 density-ratio reweight**:
+  - old vs 2023 domain holdout AUC `0.97870649`.
+  - control alpha0 exact SAFE `0.247352360403`.
+  - alpha .25 `0.247368024`(+`1.5664e-5`), .50 `0.247367766`, .75 `0.247379372`, 1.0 `0.247375769`.
+  - `P(X)` shift는 강하지만 similarity weighting은 예측 개선 못 함.
+- **EX10 domain-shift feature pruning**:
+  - domain AUC `0.97870657`.
+  - top shift: `asof_pitcher_n`, `asof_batter_n`, pitcher offspeed/reverse/middle/strike, batter success, pitcher fastball/success/breaking.
+  - best는 `drop_k=0`: `0.247352375732`, SAFE 대비 사실상 동일 `+1.53e-8`.
+  - 10/15/20 feature 제거도 `~+7.6e-6~9.5e-6` 악화; shift feature 제거로 문제 해결 안 됨.
+- **Four-axis research audit**:
+  - A conditional shift: pooled season feature gain `+0.000525270`; rolling residual mean 2022 `+0.001135`, 2023 `-0.017042`, 2024 `-0.018716`.
+  - matched same-pitcher/context delta: 2022→2023 `-0.013677`, 2023→2024 `-0.011366`.
+  - B latent state: adjacent correlations은 존재하지만 prior state→future residual gain 2023 `-0.001214`, 2024 `-0.000671` → residual 축 실패.
+  - C Trackman mechanics: direct `pitcher_id==pitcher_trackman_id` 검사 때문에 overlap 0으로 skipped; 이는 later record-linkage 성과를 잊은 구현 오류.
+  - D cold/rich: context→full_history gain cold/cold `+0.01651`, cold/rich `+0.00757`, rich/cold `+0.00846`, rich/rich `+0.00229`; 정보가치는 heterogenous.
+- **Cycle2 strict transfer**:
+  - A source→target residual:
+    - 2021→22 `+0.007016 → +0.001057`.
+    - 2022→23 `+0.001057 → -0.017043`.
+    - 2023→24 `-0.017043 → -0.018741`.
+  - same `game_type|k=100|a=.25` correction: 2021→22 `+0.0001075`, 2022→23 `-0.0003299`, 2023→24 `+0.0008043`.
+  - best recent 2023→24 `game_type|k=100|a=.5` gain 약 `+0.0011025`, 그러나 all-transition stable candidate 없음 → `recent_only`.
+  - D previous-fold router:
+    - pitcher mean gain `-0.000036726`, batter `-0.000110363`, cross `-0.000091868`.
+    - 모두 positive `0/3` → specialist routing 종료, full_history default.
+  - C는 direct ID overlap 0으로 skipped; 가설 자체의 실패가 아님.
+- **Cycle3 SAFE regime bridge**:
+  - 약한 rolling model에서 유효했던 2023 residual correction을 **SAFE982에 사전고정**하여 검증.
+  - predeclared `game_type, alpha=.50`: `0.248345081032`, SAFE 대비 **+0.000992720629 악화**.
+  - `game_type .25`도 `+0.000213944` 악화.
+  - exploratory global alpha .25가 `0.247349901796`, delta `-0.000002458607`로 미세 개선뿐.
+  - 결론: post-2023 simple residual correction은 SAFE 구조에 transfer되지 않음. A temporal correction 축 종료.
+- **현재 실험 판정 요약**:
+  - 종료: 단순 backward target inversion, four-state counterfactual, stable-trait direct injection, SAFE output blend, experience routing, density reweight, shift-feature pruning, generic/post-2023 residual correction.
+  - 이미 상당히 탐색됨: direct physical predictor, Arsenal MoE, latent/VAE/Transformer, simple calibration, model-family HPO.
+  - 강하지만 규칙 위반으로 영구 금지: test prefix/rolling/state reconstruction.
+  - 아직 제대로 남은 축: **기존 high-purity Trackman mapping을 재사용한 prior-season mechanical dispersion/drift → SAFE residual** 같은 row-independent physics signal, 또는 완전히 새로운 official-row/train-only representation.
+
+# 5. Codex/ChatGPT 현재 work flow·agent 운용 규칙
+
+- **새 agent의 시작점**:
+  - “`Bitaboost-stable-ref`”가 나오면 이 문서 + branch `bitaboost` + `configs/baseline_safe_981.yaml`을 canonical memory로 간주.
+  - 첫 행동은 새 아이디어 구현이 아니라 **중복 실험 검사**.
+  - 확인 순서:
+    1. `work_flow.md`의 4번 experiment ledger 검색.
+    2. `git branch -a`에서 동일 concept branch 검색.
+    3. `outputs/experiments/`, `outputs/night_20260819/`의 기존 metric/report 검색.
+    4. `src/bitaboost/_legacy/`와 recovered scripts에 이미 구현된 feature 확인.
+    5. 같은 가설이 있으면 새 이름으로 반복하지 말고 기존 결과를 재사용/반증.
+- **기본 branch 정책**:
+  - 안정 baseline: `bitaboost`.
+  - 과거 실험 branches: `ex1-reverse-expert`, `ex2-hypothesis-backward`, `ex3-four-state-backward-energy`, `ex4-bidirectional-stable-traits`, `ex5-stable-trait-pitch-probe`, `ex6-safe-complementarity`, `ex7-stable-trait-injection`, `ex8-cohort-routing`, `ex9-density-ratio-reweight`, `ex10-domain-feature-pruning`, `research-audit-four-axes`, `cycle2-temporal-trackman-reliability`, `cycle3-sota-regime-bridge`.
+  - `cycle3-sota-regime-bridge`는 simple regime correction 실패 branch. 여기서 alpha/HPO만 확장하지 말 것.
+  - 새 독립 가설은 새 branch. 재사용 code는 `src/bitaboost/<concept>/`, 실행 thin wrapper는 `scripts/`, config는 `experiments/configs/`.
+- **연구 자율 실행 권한**:
+  - 과거의 “스스로 검증/학습/평가 금지, 무거운 script는 사용자 실행” 제한은 **연구 종료까지 해제됨**.
+  - Codex/terminal-capable agent는 `bitaboost` conda env에서 직접 학습·평가·스크립트 실행 가능.
+  - GPU는 physical **2, 3** 사용 가능. 단 하나의 CatBoost process가 GPU2를 쓸 때는 `CUDA_VISIBLE_DEVICES=2`, 내부 `devices=0`.
+  - 두 GPU 병렬 sweep은 GPU2/GPU3에 서로 독립 process로 분리. VRAM preflight에서 다른 process가 점유하면 무리하게 실행하지 말 것.
+  - ChatGPT처럼 local shell이 없는 agent는 GitHub에 patch/push하고 정확한 실행 command를 제공; 사용자의 실행 결과를 기다린 뒤 다음 판단.
+- **표준 연구 loop**:
+  - `가설 → 과거 중복 감사 → 최소 구현 → 직접 실행 → Brier/R/F/fold/domain 진단 → 판정 → 종료 또는 결합`.
+  - 성능이 안 좋으면 **같은 branch에서 HPO를 무한 반복하지 않는다**.
+  - clear fail: baseline보다 명백히 악화 + complementarity 없음 → branch 종료, 결과를 4번 ledger에 기록.
+  - ambiguous fail: 2024만 개선/다른 fold 악화 → transfer test 1회 후 종료 여부 결정.
+  - ambiguous success: `1e-5~1e-4` gain → rolling fold, seed/noise control, R/F 확인 필수.
+  - clear success: 여러 OOT fold에서 방향 일치, SAFE보다 의미 있는 Brier 감소, row independence 통과 → 그때만 SOTA integration/packaging.
+- **평가 원칙**:
+  - primary: Brier.
+  - 최소 기록: rows, target mean, prediction mean/std, Brier, AUC diagnostic, R/F Brier, experience/cold-rich breakdown, fold별 delta, runtime.
+  - 가능하면 2022/2023/2024 rolling. 2024 한 fold만 보고 architecture/HPO를 선택하지 않음.
+  - new component는 standalone 성능뿐 아니라 SAFE residual correlation/complementarity 검사.
+  - row safety: isolated-row vs full-test prediction max abs diff `0`이어야 함.
+  - `2024 label`을 calibration/blend 선택에 사용한 결과는 diagnostic으로 명시하고 바로 deploy하지 않음.
+- **SOTA promotion 규칙**:
+  - baseline control을 동일 코드 path에서 먼저 재현. EX7처럼 control이 `0.247352360403`을 정확히 복원하는지 확인.
+  - 개선이 control noise보다 작으면 SOTA로 승격하지 않음.
+  - R/F 한 domain을 크게 희생한 평균 개선은 보수적으로 거부.
+  - hidden-test row statistics, hidden test peer dependence, external label은 단 1회라도 들어가면 전 결과 무효/quarantine.
+  - 새로운 SOTA가 생기면 config/README/work_flow의 baseline 수치, branch/commit, artifact path를 **즉시 함께 갱신**.
+- **실험 기록 의무 — 반복 방지의 핵심**:
+  - 매 실험 완료 즉시 이 파일의 4번 항목에 `가설 / 코드 branch / exact config / fold별 수치 / 판정 / 재시도 조건`을 추가.
+  - 실패 실험도 삭제하지 않음. “왜 실패했는가”가 다음 agent가 반복하지 않게 하는 핵심 artifact.
+  - 큰 sweep은 `trials.jsonl`, `best.md`, `final_summary.json`, `report.md`를 남김.
+  - 8시간 overnight precedent:
+    - `outputs/night_20260819/gpu2/`, `gpu3/`, `overnight_report.md`.
+    - detached 실행, worker별 실시간 log/report, 종료 후 summary.
+- **코드 변경 원칙**:
+  - baseline recovered feature lineage를 cleanup/refactor 명목으로 바꾸지 말 것. exact prediction equivalence 없이 legacy helper를 새 구현으로 대체 금지.
+  - early-fold validation을 만들 때 frame/aux alignment를 반드시 검사. Cycle3에서 2023 fold frame `1,221,585` vs full aux `1,475,092` boolean-length bug가 실제 발생했음.
+  - CatBoost parameter 명은 `random_seed`; `seed`를 그대로 constructor에 넘겨 EX9가 실패한 이력 있음.
+  - pandas fragmentation warning은 성능 warning일 뿐 numeric failure가 아님. 필요한 경우 한번에 concat/copy로 최적화하되 feature ordering/값 불변성 검사.
+- **Trackman 재개 시 필수 기억**:
+  - direct `pitcher_id == pitcher_trackman_id` overlap 검사는 금지된 반복 실수. namespace가 다름.
+  - 기존 mapping contract: common context fingerprint + pitchmix similarity + hand constraint + Hungarian 1:1 + quality filtering. 과거 high-purity accepted `584`.
+  - Trackman teacher/profile은 항상 `trackman_season < target_season`; 2024 row에 2024 Trackman 사용 금지.
+  - direct physical predictor/Arsenal을 그대로 반복하지 말고, 아직 미검증인 **mechanical std/dispersion/drift → next-season SAFE residual**처럼 질문 자체가 달라야 함.
+- **제출 workflow**:
+  - research SOTA가 확정되기 전에는 submission build config를 바꾸지 않음.
+  - 확정 후 full allowed history로 retrain/freeze → inference artifact 저장 → 기존 scoring package 구조에 모델만 교체 → 5-row sample smoke test → isolated-row invariance test → ZIP integrity/size/requirements 검사 → 실제 제출.
+  - `script.py`는 평가 server offline/L4/10분 제한을 만족해야 함.
+  - 새 package는 기존 `build_final_optimized.zip` 및 `baseline_submit.zip`과 구조 비교.
+- **현재 다음 우선순위**:
+  - B(backward latent residual), D(cold router), A(simple regime correction)는 정량적으로 닫힘.
+  - C(Trackman)는 Cycle2의 direct-ID 오류 때문에 미판정이지만 과거 mapping/physical 실험 이력이 많음.
+  - 따라서 다음 agent는 먼저 기존 `pitcher_mapping.csv`/mapping script/artifact를 repo/local outputs에서 복구·검증하고, **이미 한 physical experiment를 반복하지 않는 mechanical-stability residual audit**을 설계.
+  - 그마저 residual gain이 OOT에서 없으면 Trackman 축도 종료하고, SAFE982 주변의 소규모 tweak가 아닌 완전히 다른 official-row/train-only representation을 브레인스토밍.
