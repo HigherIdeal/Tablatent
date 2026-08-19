@@ -1,0 +1,46 @@
+baseline_config: configs/baseline_safe_981.yaml
+baseline_predictions: outputs/baseline/predictions.npz
+output_dir: outputs/experiments/research_audit_four_axes
+
+rolling_folds: [2022, 2023, 2024]
+min_pitcher_season_pitches: 100
+matched_cell_min_rows: 5
+cold_threshold: 50
+rich_threshold: 200
+
+row_model:
+  iterations: 220
+  learning_rate: 0.045
+  depth: 6
+  l2_leaf_reg: 12.0
+  random_strength: 0.5
+  bagging_temperature: 0.5
+  random_seed: 42
+  gpu_ram_part: 0.82
+
+conditional_shift:
+  pooled_iterations: 260
+  holdout_modulo: 5
+  holdout_remainder: 0
+
+latent_state:
+  ridge_lambda: 5.0
+
+trackman:
+  candidate_paths:
+    - data/raw/trackman_history.csv
+    - data/trackman_history.csv
+    - ../Tablatent/data/raw/trackman_history.csv
+    - ../Tablatent/data/trackman_history.csv
+  max_mechanical_columns: 12
+  min_trackman_pitches: 50
+  ridge_lambda: 10.0
+
+safety:
+  diagnostic_only: true
+  independent_rows_only: true
+  note: >-
+    This is a research audit, not a submission recipe. Rolling row models use only seasons
+    earlier than each evaluation fold. Trackman mechanical features are aggregated by
+    pitcher-season and shifted forward one season before residual tests. No validation/test
+    row sorting, rolling, cumulative state, or cross-row inference is used for deployment.
