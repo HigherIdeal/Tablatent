@@ -1,0 +1,58 @@
+experiment: ex6_safe_complementarity
+baseline_config: configs/baseline_safe_981.yaml
+validation_season: 2024
+pitcher_col: pitcher_id
+
+night:
+  gpu2_summary: outputs/night_20260819/gpu2/final_summary.json
+  gpu3_summary: outputs/night_20260819/gpu3/final_summary.json
+  gpu3_artifact_dir: outputs/night_20260819/gpu3/base_predictions
+
+safe:
+  predictions: outputs/baseline/predictions.npz
+  expected_brier: 0.247352360403
+  tolerance: 0.000020
+
+history_modes:
+  - prev
+  - recent2
+  - career
+
+output_dir: outputs/experiments/ex6_safe_complementarity
+
+blend:
+  pair_max_candidate_weight: 0.50
+  pair_step: 0.002
+  triple_max_total_candidate_weight: 0.50
+  triple_step: 0.01
+
+# GPU2 best fallback, used only if the overnight summary is unavailable.
+gpu2_fallback:
+  traits: [success, strike]
+  history_mode: career
+  reliability_k: 200.0
+  profile_value: shrunk
+  feature_kind: history_no_id
+  deviation: true
+  temporal_weight: equal
+  loss: logloss
+  iterations: 600
+  learning_rate: 0.035
+  depth: 6
+  l2_leaf_reg: 8.0
+  seed: 19
+  gpu_ram_part: 0.82
+
+# GPU3 best fallback, used only if the overnight summary/artifact is unavailable.
+gpu3_fallback:
+  feature_kind: full
+  temporal_weight: equal
+  loss: logloss
+  iterations: 900
+  learning_rate: 0.03
+  depth: 7
+  l2_leaf_reg: 16.0
+  random_strength: 0.5
+  bagging_temperature: 0.5
+  seed: 211
+  gpu_ram_part: 0.82
