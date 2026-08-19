@@ -9,7 +9,8 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
-from bitaboost.ex9.density_ratio_reweight import run
+import bitaboost.ex9.density_ratio_reweight as ex9_core
+from bitaboost.ex9.controlfix import fit_direct_weighted_exact_scale
 
 
 def main() -> None:
@@ -18,7 +19,13 @@ def main() -> None:
     parser.add_argument("--gpu", default="2")
     args = parser.parse_args()
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
-    result = run(args.config)
+
+    # Patch the EX9 direct fit with the baseline-scale-preserving implementation.
+    # This makes alpha=0 a true SAFE retrain control instead of accidentally
+    # changing CatBoost's effective regularization through global weight rescaling.
+    ex9_core._fit_direct_weighted = fit_direct_weighted_exact_scale
+
+    result = ex9_core.run(args.config)
     print("\n[EX9 complete]")
     print(f"SAFE982={result['baseline']['final_brier']:.12f}")
     print(f"domain_holdout_auc={result['domain']['holdout_auc']}")
