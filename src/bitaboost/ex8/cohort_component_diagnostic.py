@@ -95,19 +95,50 @@ def _group_block(
     return block
 
 
-def _weighted_routed_brier(groups: dict[str, Any], total_rows: int) -> float | None:
-    numer = 0.0
+def _routing_summary(groups: dict[str, Any], total_rows: int, overall_final: float) -> dict[str, Any]:
+    """Summarize cohort-oracle room without discarding sparse cohorts.
+
+    covered_oracle_brier is computed only over cohorts that meet min_rows.
+    fallback_routed_brier uses each eligible cohort's oracle and leaves the existing
+    SAFE final prediction unchanged for sparse cohorts.  The latter always covers all
+    rows and is the conservative upper-bound diagnostic we actually need.
+    """
+    oracle_numer = 0.0
+    final_numer_covered = 0.0
+    fallback_numer = 0.0
     covered = 0
+    nonempty = 0
+    eligible = 0
     for item in groups.values():
-        oracle = item.get("oracle")
-        if not oracle:
+        rows = int(item.get("rows", 0))
+        if rows <= 0:
             continue
-        rows = int(item["rows"])
-        numer += rows * float(oracle["brier"])
-        covered += rows
-    if covered != total_rows:
-        return None
-    return numer / covered
+        nonempty += 1
+        final_brier = float(item["final_brier"])
+        oracle = item.get("oracle")
+        if oracle:
+            eligible += 1
+            covered += rows
+            oracle_numer += rows * float(oracle["brier"])
+            final_numer_covered += rows * final_brier
+            fallback_numer += rows * float(oracle["brier"])
+        else:
+            fallback_numer += rows * final_brier
+    covered_oracle = oracle_numer / covered if covered else None
+    covered_final = final_numer_covered / covered if covered else None
+    fallback = fallback_numer / total_rows if total_rows else None
+    return {
+        "total_rows": int(total_rows),
+        "covered_rows": int(covered),
+        "coverage": float(covered / total_rows) if total_rows else 0.0,
+        "nonempty_groups": int(nonempty),
+        "eligible_groups": int(eligible),
+        "covered_oracle_brier": covered_oracle,
+        "covered_final_brier": covered_final,
+        "covered_gain": (float(covered_final - covered_oracle) if covered_oracle is not None else None),
+        "fallback_routed_brier": fallback,
+        "fallback_gain_vs_safe": (float(overall_final - fallback) if fallback is not None else None),
+    }
 
 
 def _report(result: dict[str, Any]) -> str:
@@ -115,6 +146,7 @@ def _report(result: dict[str, Any]) -> str:
         "# EX8 cohort/component diagnostic",
         "",
         "> Oracle weights are 2024-only upper-bound diagnostics. They are not deployment weights.",
+        "> Sparse cohorts below `min_rows_for_oracle` keep the existing SAFE final prediction in the fallback-routed upper bound.",
         "",
         f"SAFE982 final Brier: `{result['overall']['final_brier']:.12f}`",
         "",
@@ -159,15 +191,19 @@ def _report(result: dict[str, Any]) -> str:
             f"| `{name}` | {item['rows']:,} | {item['final_brier']:.9f} | `{item.get('best_component','-')}` | "
             f"{oracle['brier']:.9f} | {oracle['gain_vs_final']:+.9f} |"
         )
+    lines += ["", "## Routing upper bounds", ""]
+    for name in ("pitcher", "batter", "cross"):
+        s = result["oracle_summary"][name]
+        lines += [
+            f"- **{name}**: coverage `{s['coverage']:.3%}` ({s['covered_rows']:,}/{s['total_rows']:,}), "
+            f"eligible groups `{s['eligible_groups']}/{s['nonempty_groups']}`, "
+            f"covered oracle `{s['covered_oracle_brier']}`, covered gain `{s['covered_gain']}`, "
+            f"fallback-routed Brier `{s['fallback_routed_brier']}`, "
+            f"gain vs SAFE `{s['fallback_gain_vs_safe']}`",
+        ]
     lines += [
         "",
-        "## Global oracle upper bounds",
-        "",
-        f"- pitcher-routed oracle Brier: `{result['oracle_summary']['pitcher_routed_brier']}`",
-        f"- batter-routed oracle Brier: `{result['oracle_summary']['batter_routed_brier']}`",
-        f"- cross-routed oracle Brier: `{result['oracle_summary']['cross_routed_brier']}`",
-        "",
-        "Interpretation: only if a cohort routing scheme shows a material 2024 upper-bound gap should we spend GPU time building rolling 2022/2023 OOF cohort weights or specialized experts.",
+        "Interpretation: `fallback-routed Brier` is the useful upper-bound diagnostic: eligible cohorts receive their 2024 oracle mixture, while sparse cohorts retain SAFE. Only if that gap is material should we build rolling 2022/2023 OOF cohort routers.",
     ]
     return "\n".join(lines) + "\n"
 
@@ -208,10 +244,11 @@ def run(experiment_config: str | Path) -> dict[str, Any]:
             )
 
     overall = _group_block(y, vectors, np.ones(len(y), dtype=bool), oracle_components=oracle_components, min_rows=min_rows)
+    overall_final = float(overall["final_brier"])
     oracle_summary = {
-        "pitcher_routed_brier": _weighted_routed_brier(pitcher_groups, len(y)),
-        "batter_routed_brier": _weighted_routed_brier(batter_groups, len(y)),
-        "cross_routed_brier": _weighted_routed_brier(cross_groups, len(y)),
+        "pitcher": _routing_summary(pitcher_groups, len(y), overall_final),
+        "batter": _routing_summary(batter_groups, len(y), overall_final),
+        "cross": _routing_summary(cross_groups, len(y), overall_final),
     }
     result = {
         "overall": overall,
