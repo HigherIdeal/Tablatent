@@ -15,7 +15,7 @@ from bitaboost.cycle3.sota_regime_bridge import run
 
 
 def _install_early_fold_prepare_fix() -> None:
-    """Align full-frame auxiliary targets after an early validation-season slice.
+    """Make the recovered SAFE trainer safe for the intentional 2023 source fold.
 
     SAFE982 normally validates on 2024, so the prepared frame and the full auxiliary
     reconstruction both contain all 2019-2024 rows. Cycle3 intentionally moves the
@@ -26,7 +26,11 @@ def _install_early_fold_prepare_fix() -> None:
 
     Keep the core SAFE implementation untouched and patch only this diagnostic runner:
     align auxiliary rows to the exact prepared-frame index before baseline training.
-    For the ordinary 2024 SAFE run lengths already match and this is a no-op.
+    The ordinary 2024 SAFE run is unchanged because its lengths already match.
+
+    The baseline's forensic reference audit is also 2024-specific. It must be disabled
+    for the 2023 source fold; otherwise a correctly trained 2023 vector would be
+    rejected only because it cannot match the 2024 reference target/vector lengths.
     """
 
     def prepare_aligned(cfg):
@@ -45,6 +49,10 @@ def _install_early_fold_prepare_fix() -> None:
         return data
 
     baseline_core.prepare = prepare_aligned
+    baseline_core.audit_if_available = lambda cfg, y, components: {
+        "available": False,
+        "reason": "cycle3_2023_source_fold",
+    }
 
 
 def main() -> None:
