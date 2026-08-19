@@ -1,0 +1,25 @@
+baseline_config: configs/baseline_safe_981.yaml
+baseline_predictions: outputs/baseline/predictions.npz
+baseline_metrics: outputs/baseline/metrics.json
+output_dir: outputs/experiments/ex9_density_ratio_reweight
+
+recent_season: 2023
+validation_season: 2024
+alphas: [0.0, 0.25, 0.5, 0.75, 1.0]
+ratio_clip: [0.25, 4.0]
+
+domain_model:
+  iterations: 300
+  learning_rate: 0.05
+  depth: 6
+  l2_leaf_reg: 12.0
+  random_strength: 0.5
+  seed: 42
+  gpu_ram_part: 0.82
+
+safety:
+  independent_rows_only: true
+  note: >-
+    Domain weights are estimated only from official training inputs from seasons <=2023.
+    Validation 2024 rows are never used to construct training weights. The domain model
+    excludes season and entity IDs. SAFE downstream components and blend weights remain frozen.
