@@ -1,0 +1,53 @@
+baseline_config: configs/baseline_safe_981.yaml
+output_dir: outputs/experiments/cycle2_temporal_trackman_reliability
+
+rolling_folds: [2021, 2022, 2023, 2024]
+
+row_model:
+  iterations: 220
+  learning_rate: 0.045
+  depth: 6
+  l2_leaf_reg: 12.0
+  random_strength: 0.5
+  bagging_temperature: 0.5
+  random_seed: 42
+  gpu_ram_part: 0.82
+
+temporal_transfer:
+  correction_alphas: [0.25, 0.5, 0.75, 1.0]
+  shrinkage_k: [100, 500, 2000]
+  experience_edges: [0, 1, 10, 50, 200, 500]
+  min_group_rows: 100
+  variants: [global, game_type, pitcher_experience, game_type_x_pitcher_experience]
+
+trackman:
+  candidate_paths:
+    - data/raw/trackman_history.csv
+    - data/trackman_history.csv
+    - ../Tablatent/data/raw/trackman_history.csv
+    - ../Tablatent/data/trackman_history.csv
+  train_pitcher_id_candidates: [pitcher_id, pitcher_trackman_id]
+  trackman_pitcher_id_candidates: [pitcher_trackman_id, pitcher_id]
+  season_candidates: [season, year]
+  pitch_type_candidates: [pitch_type_group, auto_pitch_type, tagged_pitch_type]
+  max_mechanical_columns: 12
+  min_trackman_pitches: 50
+  min_pitch_type_pitches: 20
+  ridge_lambda: 10.0
+  min_id_overlap_fraction: 0.05
+
+reliability:
+  experience_edges: [0, 1, 10, 50, 200, 500]
+  min_source_rows: 1000
+  variants: [context, pitcher_history, batter_history, full_history]
+  router_axes: [pitcher, batter, cross]
+
+safety:
+  diagnostic_only: true
+  independent_rows_only: true
+  note: >-
+    Cycle 2 is diagnostic. Temporal corrections are learned only from one completed
+    historical fold and applied to the next fold. Trackman features are aggregated
+    by pitcher-season and shifted forward one season. Reliability routers select
+    models using only the immediately previous OOF fold. No evaluation/test row
+    depends on another evaluation/test row at deployment.
