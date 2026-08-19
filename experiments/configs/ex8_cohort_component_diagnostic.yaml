@@ -1,0 +1,16 @@
+baseline_config: configs/baseline_safe_981.yaml
+baseline_predictions: outputs/baseline/predictions.npz
+output_dir: outputs/experiments/ex8_cohort_component_diagnostic
+
+min_rows_for_oracle: 5000
+components: [direct, mixed, offset, joint, structured, safe, pred]
+core_oracle_components: [mixed, offset, joint, structured]
+
+safety:
+  diagnostic_only: true
+  independent_rows_only: true
+  note: >-
+    EX8 analyzes already-generated 2024 SAFE component predictions by current-row
+    as-of pitcher/batter experience cohorts. Per-cohort oracle weights are an upper-bound
+    diagnostic only and must never be used as deployment weights unless reproduced from
+    earlier rolling OOF folds. No validation/test-row feature interaction is created.
