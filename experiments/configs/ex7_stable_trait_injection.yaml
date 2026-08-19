@@ -9,6 +9,8 @@ profile:
   traits: [success, strike]
 
 variants:
+  - name: retrain_control
+    features: []
   - name: career_success
     features: [career_success]
   - name: career_strike
@@ -22,6 +24,7 @@ variants:
 
 promotion:
   min_final_brier_gain: 0.00002
+  min_gain_over_retrain_control: 0.00001
   max_domain_regression: 0.00020
 
 safety:
